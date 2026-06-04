@@ -93,7 +93,7 @@ func (g *Gateway) CallbackOrderID(params map[string]string) string {
 //	"TransactionCode" random reference (present only when result=true)
 func (g *Gateway) Verify(_ context.Context, p *payjet.Payment, params map[string]string) (*payjet.VerifyResult, error) {
 	if params["result"] != "true" {
-		return nil, &payjet.Error{Gateway: "virtual", Op: "verify", Err: payjet.ErrCancelled}
+		return nil, payjet.Declined("virtual", "verify", params["result"], "")
 	}
 	txCode := params["TransactionCode"]
 	if txCode == "" {

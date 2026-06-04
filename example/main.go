@@ -1,29 +1,29 @@
-// Example application demonstrating payjet with Gin.
+// Example application demonstrating payjet built on the microjet stack.
 //
-// Run in development (virtual gateway, no real bank):
+// It uses microjet's host orchestrator (config, logging, graceful shutdown),
+// a PostgreSQL-backed payment store via postgres.Table[T], and the gin router
+// microjet's HTTP server already wires with logging/recovery/health middleware.
 //
+// Configure the gateway and credentials in config.toml under [extra.payjet],
+// or override anything via env vars (APP_ prefix). The default gateway is the
+// virtual one, so the app runs end-to-end with no real bank — but it does need
+// a PostgreSQL database matching the [database] section.
+//
+//	# start postgres (matching config.toml), then:
 //	go run ./example
-//
-// Run against a real gateway:
-//
-//	GATEWAY=zarinpal ZARINPAL_MERCHANT_ID=xxxx-xxxx go run ./example
-//	GATEWAY=mellat   MELLAT_TERMINAL_ID=1234 MELLAT_USER=u MELLAT_PASS=p go run ./example
-//	GATEWAY=idpay    IDPAY_API_KEY=xxxx go run ./example
-//	GATEWAY=saman    SAMAN_TERMINAL_ID=12345678 go run ./example
-//	GATEWAY=parsian  PARSIAN_LOGIN=xxxx go run ./example
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
-	"os"
-	"strconv"
-	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/hatami57/microjet/core"
+	"github.com/hatami57/microjet/host"
+	"github.com/hatami57/microjet/postgres"
 	"github.com/majid/payjet"
 	"github.com/majid/payjet/idpay"
 	"github.com/majid/payjet/mellat"
@@ -33,114 +33,265 @@ import (
 	"github.com/majid/payjet/zarinpal"
 )
 
-// ── in-memory payment store (replace with DB in production) ──────────────────
+// ── persistence ──────────────────────────────────────────────────────────────
 
-type storedPayment struct {
-	payment   *payjet.Payment
-	createdAt time.Time
+// PaymentRecord is the GORM entity backing the payment store. It is keyed by the
+// merchant OrderID and also indexes the gateway Token, so gateways that echo the
+// order ID in their callback and gateways that only echo a token (Zarinpal) can
+// both be looked up via Gateway.CallbackOrderID.
+type PaymentRecord struct {
+	OrderID     string `gorm:"primaryKey"`
+	Token       string `gorm:"index"`
+	Amount      int64  // Rials
+	CallbackURL string
+	Status      string // pending | succeeded | failed
+	RefID       string
+	CardNumber  string
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
 
-var (
-	paymentsMu sync.RWMutex
-	payments   = map[string]*storedPayment{} // orderID → payment
-)
-
-func savePayment(p *payjet.Payment) {
-	paymentsMu.Lock()
-	payments[p.OrderID] = &storedPayment{payment: p, createdAt: time.Now()}
-	paymentsMu.Unlock()
+// store wraps the generic microjet table with payment-specific lookups.
+type store struct {
+	table *postgres.Table[PaymentRecord]
 }
 
-// savePaymentByToken additionally indexes a payment under the gateway token, so
-// gateways that do not echo the order ID in their callback (Zarinpal) can still
-// be looked up via Gateway.CallbackOrderID.
-func savePaymentByToken(token string, p *payjet.Payment) {
-	if token == "" {
-		return
+func (s *store) save(ctx context.Context, r *PaymentRecord) error {
+	return s.table.Upsert(ctx, r)
+}
+
+// load finds a payment by either its OrderID or its gateway Token.
+func (s *store) load(ctx context.Context, key string) (*PaymentRecord, error) {
+	rec, err := s.table.Find(ctx, "order_id = ?", key)
+	if err != nil {
+		return nil, err
 	}
-	paymentsMu.Lock()
-	payments[token] = &storedPayment{payment: p, createdAt: time.Now()}
-	paymentsMu.Unlock()
-}
-
-func loadPayment(key string) (*payjet.Payment, bool) {
-	paymentsMu.RLock()
-	defer paymentsMu.RUnlock()
-	s, ok := payments[key]
-	if !ok {
-		return nil, false
+	if rec != nil {
+		return rec, nil
 	}
-	return s.payment, true
+	return s.table.Find(ctx, "token = ?", key)
 }
 
-// ── gateway factory ───────────────────────────────────────────────────────────
+// ── gateway configuration (read from [extra.payjet]) ─────────────────────────
 
-func buildGateway(r *gin.Engine) (payjet.Gateway, error) {
-	switch os.Getenv("GATEWAY") {
+type payjetConfig struct {
+	Gateway  string `json:"gateway"`
+	Zarinpal struct {
+		MerchantID string `json:"merchantID"`
+		Sandbox    bool   `json:"sandbox"`
+	} `json:"zarinpal"`
+	IDPay struct {
+		APIKey  string `json:"apiKey"`
+		Sandbox bool   `json:"sandbox"`
+	} `json:"idpay"`
+	Saman struct {
+		TerminalID string `json:"terminalID"`
+	} `json:"saman"`
+	Parsian struct {
+		LoginAccount string `json:"loginAccount"`
+	} `json:"parsian"`
+	Mellat struct {
+		TerminalID int64  `json:"terminalID"`
+		Username   string `json:"username"`
+		Password   string `json:"password"`
+	} `json:"mellat"`
+}
 
+// buildGateway selects and constructs the gateway from config. For the virtual
+// gateway it also mounts the local HTML payment page on the router.
+func buildGateway(cfg payjetConfig, baseURL string, r *gin.Engine) (payjet.Gateway, error) {
+	switch cfg.Gateway {
 	case "zarinpal":
-		mid := os.Getenv("ZARINPAL_MERCHANT_ID")
-		if mid == "" {
-			return nil, fmt.Errorf("ZARINPAL_MERCHANT_ID is required")
+		if cfg.Zarinpal.MerchantID == "" {
+			return nil, core.NewBadRequestError("config", "zarinpal.merchantID is required")
 		}
-		opts := []zarinpal.Option{}
-		if os.Getenv("ZARINPAL_SANDBOX") == "1" {
+		var opts []zarinpal.Option
+		if cfg.Zarinpal.Sandbox {
 			opts = append(opts, zarinpal.WithSandbox())
 		}
-		return zarinpal.New(mid, opts...), nil
-
-	case "mellat":
-		tid, err := strconv.ParseInt(os.Getenv("MELLAT_TERMINAL_ID"), 10, 64)
-		if err != nil {
-			return nil, fmt.Errorf("MELLAT_TERMINAL_ID must be numeric: %w", err)
-		}
-		opts := []mellat.Option{}
-		if os.Getenv("MELLAT_ENGLISH") == "1" {
-			opts = append(opts, mellat.WithEnglishPage())
-		}
-		return mellat.New(mellat.Config{
-			TerminalID: tid,
-			Username:   os.Getenv("MELLAT_USER"),
-			Password:   os.Getenv("MELLAT_PASS"),
-		}, opts...), nil
+		return zarinpal.New(cfg.Zarinpal.MerchantID, opts...), nil
 
 	case "idpay":
-		key := os.Getenv("IDPAY_API_KEY")
-		if key == "" {
-			return nil, fmt.Errorf("IDPAY_API_KEY is required")
+		if cfg.IDPay.APIKey == "" {
+			return nil, core.NewBadRequestError("config", "idpay.apiKey is required")
 		}
-		opts := []idpay.Option{}
-		if os.Getenv("IDPAY_SANDBOX") == "1" {
+		var opts []idpay.Option
+		if cfg.IDPay.Sandbox {
 			opts = append(opts, idpay.WithSandbox())
 		}
-		return idpay.New(key, opts...), nil
+		return idpay.New(cfg.IDPay.APIKey, opts...), nil
 
 	case "saman":
-		tid := os.Getenv("SAMAN_TERMINAL_ID")
-		if tid == "" {
-			return nil, fmt.Errorf("SAMAN_TERMINAL_ID is required")
+		if cfg.Saman.TerminalID == "" {
+			return nil, core.NewBadRequestError("config", "saman.terminalID is required")
 		}
-		return saman.New(tid), nil
+		return saman.New(cfg.Saman.TerminalID), nil
 
 	case "parsian":
-		login := os.Getenv("PARSIAN_LOGIN")
-		if login == "" {
-			return nil, fmt.Errorf("PARSIAN_LOGIN is required")
+		if cfg.Parsian.LoginAccount == "" {
+			return nil, core.NewBadRequestError("config", "parsian.loginAccount is required")
 		}
-		return parsian.New(login), nil
+		return parsian.New(cfg.Parsian.LoginAccount), nil
 
-	default:
-		// Development: virtual gateway — no bank needed.
-		log.Println("[payjet] using virtual gateway (development mode)")
-		vgw := virtual.New("http://localhost:8080/virtual-pay")
-		// Mount the HTML payment page at the same path used in New().
+	case "mellat":
+		if cfg.Mellat.TerminalID == 0 {
+			return nil, core.NewBadRequestError("config", "mellat.terminalID is required")
+		}
+		return mellat.New(mellat.Config{
+			TerminalID: cfg.Mellat.TerminalID,
+			Username:   cfg.Mellat.Username,
+			Password:   cfg.Mellat.Password,
+		}), nil
+
+	default: // virtual
+		vgw := virtual.New(baseURL + "/virtual-pay")
 		r.GET("/virtual-pay", gin.WrapH(vgw.Handler()))
 		r.POST("/virtual-pay", gin.WrapH(vgw.Handler()))
 		return vgw, nil
 	}
 }
 
-// ── handlers ─────────────────────────────────────────────────────────────────
+// ── route registration & handlers ────────────────────────────────────────────
+
+func registerRoutes(app *host.App) error {
+	cfg, err := core.GetExtra[payjetConfig](app.Config, "payjet")
+	if err != nil {
+		return fmt.Errorf("reading [extra.payjet] config: %w", err)
+	}
+
+	baseURL := fmt.Sprintf("http://localhost:%d", app.Config.Server.Port)
+	r := app.HTTPServer.Router
+
+	gw, err := buildGateway(cfg, baseURL, r)
+	if err != nil {
+		return err
+	}
+	app.Logger.Info("payjet gateway ready", "gateway", cfg.Gateway)
+
+	st := &store{table: postgres.NewTable[PaymentRecord](app.DB())}
+
+	r.GET("/", indexHandler)
+	r.POST("/checkout", checkoutHandler(app, gw, st, baseURL))
+	r.GET("/payment/callback", callbackHandler(app, gw, st))
+	r.POST("/payment/callback", callbackHandler(app, gw, st))
+	r.GET("/payment/result", resultHandler)
+	return nil
+}
+
+// POST /checkout — creates a payment, persists it, and redirects to the gateway.
+func checkoutHandler(app *host.App, gw payjet.Gateway, st *store, baseURL string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		ctx := c.Request.Context()
+		orderID := fmt.Sprintf("order-%d", time.Now().UnixMilli())
+
+		p := &payjet.Payment{
+			OrderID:     orderID,
+			Amount:      500_000, // 50,000 Tomans in Rials
+			CallbackURL: baseURL + "/payment/callback",
+			Description: "خرید از فروشگاه نمونه",
+		}
+		// payjet's money bridge tags the amount with its currency for logging.
+		app.Logger.Info("checkout started",
+			"orderID", orderID,
+			"amount", p.Money().Value.String(),
+			"currency", p.Money().CurrencyCode,
+		)
+
+		if err := st.save(ctx, &PaymentRecord{
+			OrderID:     p.OrderID,
+			Amount:      p.Amount,
+			CallbackURL: p.CallbackURL,
+			Status:      "pending",
+		}); err != nil {
+			app.Logger.Error("save payment failed", "orderID", orderID, "error", err)
+			c.Redirect(http.StatusFound, "/payment/result?status=error&msg=internal+error")
+			return
+		}
+
+		res, err := gw.Request(ctx, p)
+		if err != nil {
+			app.Logger.Error("gateway request failed", "orderID", orderID, "error", err)
+			c.Redirect(http.StatusFound, "/payment/result?status=error&msg=gateway+error")
+			return
+		}
+
+		// Record the token so a token-only callback (Zarinpal) can be matched.
+		if res.Token != "" {
+			_ = st.save(ctx, &PaymentRecord{
+				OrderID:     p.OrderID,
+				Token:       res.Token,
+				Amount:      p.Amount,
+				CallbackURL: p.CallbackURL,
+				Status:      "pending",
+			})
+		}
+
+		// One call handles both GET redirects and POST self-submitting forms.
+		if err := res.Redirect(c.Writer, c.Request); err != nil {
+			app.Logger.Error("redirect failed", "orderID", orderID, "error", err)
+			c.Redirect(http.StatusFound, "/payment/result?status=error&msg=redirect+error")
+		}
+	}
+}
+
+// GET|POST /payment/callback — the bank returns the user here after payment.
+func callbackHandler(app *host.App, gw payjet.Gateway, st *store) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		ctx := c.Request.Context()
+		params := payjet.ParseCallback(c.Request)
+		key := gw.CallbackOrderID(params)
+
+		rec, err := st.load(ctx, key)
+		if err != nil {
+			app.Logger.Error("load payment failed", "key", key, "error", err)
+			c.Redirect(http.StatusFound, "/payment/result?status=error&msg=internal+error")
+			return
+		}
+		if rec == nil {
+			c.Redirect(http.StatusFound, "/payment/result?status=error&msg=order+not+found")
+			return
+		}
+
+		p := &payjet.Payment{OrderID: rec.OrderID, Amount: rec.Amount, CallbackURL: rec.CallbackURL}
+		result, err := gw.Verify(ctx, p, params)
+		if err != nil {
+			rec.Status = "failed"
+			_ = st.save(ctx, rec)
+			// A user cancelling is a normal flow, not a system failure.
+			if errors.Is(err, payjet.ErrCancelled) {
+				c.Redirect(http.StatusFound, "/payment/result?status=failed")
+				return
+			}
+			app.Logger.Error("verify failed", "orderID", rec.OrderID, "error", err)
+			c.Redirect(http.StatusFound, "/payment/result?status=failed")
+			return
+		}
+
+		rec.Status = "succeeded"
+		rec.RefID = result.RefID
+		rec.CardNumber = result.CardNumber
+		if err := st.save(ctx, rec); err != nil {
+			app.Logger.Error("update payment failed", "orderID", rec.OrderID, "error", err)
+		}
+
+		app.Logger.Info("payment succeeded",
+			"orderID", result.OrderID, "refID", result.RefID, "card", result.CardNumber)
+		c.Redirect(http.StatusFound,
+			fmt.Sprintf("/payment/result?status=success&ref=%s", result.RefID))
+	}
+}
+
+// ── main ─────────────────────────────────────────────────────────────────────
+
+func main() {
+	host.MustNew().
+		WithPostgreSQL().
+		Setup(func(a *host.App) error { return a.DB().AutoMigrate(&PaymentRecord{}) }).
+		WithHTTPServer(registerRoutes).
+		MustRun() // inits services, starts HTTP, blocks until signal, then shuts down
+}
+
+// ── static HTML pages ──────────────────────────────────────────────────────────
 
 // GET /
 func indexHandler(c *gin.Context) {
@@ -167,82 +318,20 @@ func indexHandler(c *gin.Context) {
 </html>`))
 }
 
-// POST /checkout — creates a payment and redirects to the gateway
-func checkoutHandler(gw payjet.Gateway) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		orderID := fmt.Sprintf("order-%d", time.Now().UnixMilli())
-
-		p := &payjet.Payment{
-			OrderID:     orderID,
-			Amount:      500_000, // 50,000 Tomans in Rials
-			CallbackURL: "http://localhost:8080/payment/callback",
-			Description: "خرید از فروشگاه نمونه",
-		}
-		savePayment(p)
-
-		res, err := gw.Request(c.Request.Context(), p)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-		// Index by token too, so gateways that don't echo the order ID in their
-		// callback (Zarinpal) can still be looked up in callbackHandler.
-		savePaymentByToken(res.Token, p)
-
-		// One call handles both GET redirects and POST self-submitting forms.
-		if err := res.Redirect(c.Writer, c.Request); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		}
-	}
-}
-
-// GET /payment/callback — the bank posts/gets here after payment
-func callbackHandler(gw payjet.Gateway) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		// The SDK merges query + form fields; the gateway knows its own ID field.
-		params := payjet.ParseCallback(c.Request)
-		key := gw.CallbackOrderID(params)
-
-		p, ok := loadPayment(key)
-		if !ok {
-			c.Redirect(http.StatusFound, "/payment/result?status=error&msg=order+not+found")
-			return
-		}
-
-		verifyResult, err := gw.Verify(c.Request.Context(), p, params)
-		if err != nil {
-			// A user cancelling is a normal flow, not a system failure.
-			if errors.Is(err, payjet.ErrCancelled) {
-				c.Redirect(http.StatusFound, "/payment/result?status=failed")
-				return
-			}
-			log.Printf("[payjet] verify error for order %s: %v", p.OrderID, err)
-			c.Redirect(http.StatusFound, "/payment/result?status=failed")
-			return
-		}
-
-		log.Printf("[payjet] payment succeeded: order=%s refID=%s card=%s",
-			verifyResult.OrderID, verifyResult.RefID, verifyResult.CardNumber)
-
-		c.Redirect(http.StatusFound,
-			fmt.Sprintf("/payment/result?status=success&ref=%s", verifyResult.RefID))
-	}
-}
-
 // GET /payment/result
 func resultHandler(c *gin.Context) {
 	status := c.Query("status")
 	ref := c.Query("ref")
 	msg := c.Query("msg")
 
-	var html string
+	var inner string
 	switch status {
 	case "success":
-		html = fmt.Sprintf(`<div style="color:green"><h2>✓ پرداخت موفق</h2><p>کد پیگیری: <b>%s</b></p></div>`, ref)
+		inner = fmt.Sprintf(`<div style="color:green"><h2>✓ پرداخت موفق</h2><p>کد پیگیری: <b>%s</b></p></div>`, ref)
 	case "failed":
-		html = `<div style="color:red"><h2>✗ پرداخت ناموفق</h2><p>لطفاً دوباره تلاش کنید.</p></div>`
+		inner = `<div style="color:red"><h2>✗ پرداخت ناموفق</h2><p>لطفاً دوباره تلاش کنید.</p></div>`
 	default:
-		html = fmt.Sprintf(`<div style="color:orange"><h2>خطا</h2><p>%s</p></div>`, msg)
+		inner = fmt.Sprintf(`<div style="color:orange"><h2>خطا</h2><p>%s</p></div>`, msg)
 	}
 
 	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(`<!DOCTYPE html>
@@ -252,26 +341,5 @@ func resultHandler(c *gin.Context) {
 .box{background:#fff;padding:2rem;border-radius:10px;box-shadow:0 4px 16px rgba(0,0,0,.1);text-align:center;width:320px}
 a{display:inline-block;margin-top:1.5rem;color:#007bff}</style>
 </head>
-<body><div class="box">`+html+`<br><a href="/">بازگشت به فروشگاه</a></div></body></html>`))
-}
-
-// ── main ─────────────────────────────────────────────────────────────────────
-
-func main() {
-	r := gin.Default()
-
-	gw, err := buildGateway(r)
-	if err != nil {
-		log.Fatalf("gateway config error: %v", err)
-	}
-
-	r.GET("/", indexHandler)
-	r.POST("/checkout", checkoutHandler(gw))
-	r.GET("/payment/callback", callbackHandler(gw))
-	r.POST("/payment/callback", callbackHandler(gw)) // some gateways POST the callback
-	r.GET("/payment/result", resultHandler)
-
-	addr := ":8080"
-	log.Printf("[payjet] listening on http://localhost%s", addr)
-	log.Fatal(r.Run(addr))
+<body><div class="box">`+inner+`<br><a href="/">بازگشت به فروشگاه</a></div></body></html>`))
 }

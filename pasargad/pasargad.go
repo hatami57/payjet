@@ -123,8 +123,8 @@ func (g *Gateway) getToken(ctx context.Context) (string, error) {
 		return "", err
 	}
 	if result.ResultCode != 0 || result.Token == "" {
-		return "", &payjet.Error{Gateway: "pasargad", Op: "auth",
-			GatewayCode: strconv.Itoa(result.ResultCode), Message: result.ResultMsg}
+		return "", payjet.Rejected("pasargad", "auth",
+			strconv.Itoa(result.ResultCode), result.ResultMsg)
 	}
 	return result.Token, nil
 }
@@ -192,8 +192,8 @@ func (g *Gateway) Request(ctx context.Context, p *payjet.Payment) (*payjet.Reque
 		return nil, err
 	}
 	if result.ResultCode != 0 {
-		return nil, &payjet.Error{Gateway: "pasargad", Op: "request",
-			GatewayCode: strconv.Itoa(result.ResultCode), Message: result.ResultMsg}
+		return nil, payjet.Rejected("pasargad", "request",
+			strconv.Itoa(result.ResultCode), result.ResultMsg)
 	}
 	return &payjet.RequestResult{
 		Token:      result.Data.UrlId,
@@ -204,11 +204,10 @@ func (g *Gateway) Request(ctx context.Context, p *payjet.Payment) (*payjet.Reque
 
 func (g *Gateway) Verify(ctx context.Context, p *payjet.Payment, params map[string]string) (*payjet.VerifyResult, error) {
 	if strings.ToLower(params["status"]) != "success" {
-		return nil, &payjet.Error{Gateway: "pasargad", Op: "verify",
-			GatewayCode: params["status"], Err: payjet.ErrCancelled}
+		return nil, payjet.Declined("pasargad", "verify", params["status"], "")
 	}
 	if params["invoiceId"] != p.OrderID {
-		return nil, &payjet.Error{Gateway: "pasargad", Op: "verify", Err: payjet.ErrOrderMismatch}
+		return nil, payjet.Mismatch("pasargad", "verify", payjet.ErrOrderMismatch)
 	}
 	token, err := g.getToken(ctx)
 	if err != nil {
@@ -222,8 +221,8 @@ func (g *Gateway) Verify(ctx context.Context, p *payjet.Payment, params map[stri
 		return nil, err
 	}
 	if result.ResultCode != 0 {
-		return nil, &payjet.Error{Gateway: "pasargad", Op: "verify",
-			GatewayCode: strconv.Itoa(result.ResultCode), Message: result.ResultMsg}
+		return nil, payjet.Rejected("pasargad", "verify",
+			strconv.Itoa(result.ResultCode), result.ResultMsg)
 	}
 	return &payjet.VerifyResult{
 		RefID:     params["referenceNumber"],

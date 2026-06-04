@@ -115,8 +115,8 @@ func (g *Gateway) Request(ctx context.Context, p *payjet.Payment) (*payjet.Reque
 		return nil, err
 	}
 	if result.Status != 1 || result.Token == "" {
-		return nil, &payjet.Error{Gateway: "saman", Op: "request",
-			GatewayCode: strconv.Itoa(result.ErrorCode), Message: result.ErrorDesc}
+		return nil, payjet.Rejected("saman", "request",
+			strconv.Itoa(result.ErrorCode), result.ErrorDesc)
 	}
 	return &payjet.RequestResult{
 		Token:      result.Token,
@@ -145,11 +145,10 @@ type verifyResponse struct {
 func (g *Gateway) Verify(ctx context.Context, p *payjet.Payment, params map[string]string) (*payjet.VerifyResult, error) {
 	// Status "2" = successful payment
 	if params["Status"] != "2" {
-		return nil, &payjet.Error{Gateway: "saman", Op: "verify",
-			GatewayCode: params["Status"], Err: payjet.ErrCancelled}
+		return nil, payjet.Declined("saman", "verify", params["Status"], "")
 	}
 	if params["ResNum"] != p.OrderID {
-		return nil, &payjet.Error{Gateway: "saman", Op: "verify", Err: payjet.ErrOrderMismatch}
+		return nil, payjet.Mismatch("saman", "verify", payjet.ErrOrderMismatch)
 	}
 
 	b, err := json.Marshal(verifyRequest{
@@ -176,11 +175,11 @@ func (g *Gateway) Verify(ctx context.Context, p *payjet.Payment, params map[stri
 		return nil, err
 	}
 	if result.ResultCode != 0 {
-		return nil, &payjet.Error{Gateway: "saman", Op: "verify",
-			GatewayCode: strconv.Itoa(result.ResultCode), Message: result.ResultDescription}
+		return nil, payjet.Rejected("saman", "verify",
+			strconv.Itoa(result.ResultCode), result.ResultDescription)
 	}
 	if result.TransactionDetail.AffectiveAmount != p.Amount {
-		return nil, &payjet.Error{Gateway: "saman", Op: "verify", Err: payjet.ErrAmountMismatch}
+		return nil, payjet.Mismatch("saman", "verify", payjet.ErrAmountMismatch)
 	}
 	return &payjet.VerifyResult{
 		RefID:      result.TransactionDetail.Rrn,

@@ -109,7 +109,7 @@ func TestRequest_TokenFailed(t *testing.T) {
 
 	_, err := gw.Request(context.Background(), testPayment)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed")
+	assert.Contains(t, err.Error(), "invalid terminal")
 }
 
 // ── Verify ────────────────────────────────────────────────────────────────────

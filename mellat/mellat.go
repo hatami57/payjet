@@ -5,13 +5,13 @@ import (
 	"context"
 	"encoding/xml"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/majid/payjet"
+	"github.com/majid/payjet/internal/soap"
 )
 
 const (
@@ -105,20 +105,7 @@ func (g *Gateway) call(ctx context.Context, action, innerXML string) (string, er
 			`<soapenv:Header/><soapenv:Body>%s</soapenv:Body></soapenv:Envelope>`,
 		soapNS, innerXML,
 	)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, g.soapEndpoint, strings.NewReader(envelope))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", "text/xml; charset=UTF-8")
-	req.Header.Set("SOAPAction", soapNS+action)
-
-	resp, err := g.client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	data, err := io.ReadAll(resp.Body)
+	data, err := soap.Post(ctx, g.client, g.soapEndpoint, soapNS+action, envelope)
 	if err != nil {
 		return "", err
 	}
@@ -142,8 +129,8 @@ func (g *Gateway) Request(ctx context.Context, p *payjet.Payment) (*payjet.Reque
 	}
 	orderID, err := strconv.ParseInt(p.OrderID, 10, 64)
 	if err != nil {
-		return nil, &payjet.Error{Gateway: "mellat", Op: "request",
-			Message: fmt.Sprintf("OrderID must be numeric, got %q", p.OrderID)}
+		return nil, payjet.Invalid("mellat", "request",
+			fmt.Sprintf("OrderID must be numeric, got %q", p.OrderID))
 	}
 	now := time.Now()
 	body := fmt.Sprintf(
@@ -170,11 +157,11 @@ func (g *Gateway) Request(ctx context.Context, p *payjet.Payment) (*payjet.Reque
 	}
 	parts := strings.SplitN(raw, ",", 2)
 	if len(parts) != 2 {
-		return nil, &payjet.Error{Gateway: "mellat", Op: "request",
-			Message: fmt.Sprintf("unexpected bpPayRequest response: %q", raw)}
+		return nil, payjet.Fault("mellat", "request",
+			fmt.Sprintf("unexpected bpPayRequest response: %q", raw), nil)
 	}
 	if code := strings.TrimSpace(parts[0]); code != "0" {
-		return nil, &payjet.Error{Gateway: "mellat", Op: "request", GatewayCode: code}
+		return nil, payjet.Rejected("mellat", "request", code, "")
 	}
 	refID := strings.TrimSpace(parts[1])
 	return &payjet.RequestResult{
@@ -187,20 +174,19 @@ func (g *Gateway) Request(ctx context.Context, p *payjet.Payment) (*payjet.Reque
 
 func (g *Gateway) Verify(ctx context.Context, p *payjet.Payment, params map[string]string) (*payjet.VerifyResult, error) {
 	if params["ResCode"] != "0" {
-		return nil, &payjet.Error{Gateway: "mellat", Op: "verify",
-			GatewayCode: params["ResCode"], Err: payjet.ErrCancelled}
+		return nil, payjet.Declined("mellat", "verify", params["ResCode"], "")
 	}
 	if params["RefId"] == "" || params["SaleOrderId"] == "" {
-		return nil, &payjet.Error{Gateway: "mellat", Op: "verify", Message: "incomplete callback params"}
+		return nil, payjet.Fault("mellat", "verify", "incomplete callback params", nil)
 	}
 	orderID, _ := strconv.ParseInt(p.OrderID, 10, 64)
 	saleOrderID, err := strconv.ParseInt(params["SaleOrderId"], 10, 64)
 	if err != nil {
-		return nil, &payjet.Error{Gateway: "mellat", Op: "verify", Message: "invalid SaleOrderId"}
+		return nil, payjet.Fault("mellat", "verify", "invalid SaleOrderId", err)
 	}
 	saleRefID, err := strconv.ParseInt(params["SaleReferenceId"], 10, 64)
 	if err != nil {
-		return nil, &payjet.Error{Gateway: "mellat", Op: "verify", Message: "invalid SaleReferenceId"}
+		return nil, payjet.Fault("mellat", "verify", "invalid SaleReferenceId", err)
 	}
 	if err := g.verify(ctx, orderID, saleOrderID, saleRefID); err != nil {
 		return nil, err
@@ -235,7 +221,7 @@ func (g *Gateway) verify(ctx context.Context, orderID, saleOrderID, saleRefID in
 		return err
 	}
 	if code != "0" && code != "43" { // 43 = already verified
-		return &payjet.Error{Gateway: "mellat", Op: "verify", GatewayCode: code}
+		return payjet.Rejected("mellat", "verify", code, "")
 	}
 	return nil
 }
@@ -258,7 +244,7 @@ func (g *Gateway) settle(ctx context.Context, orderID, saleOrderID, saleRefID in
 		return err
 	}
 	if code != "0" && code != "45" { // 45 = already settled
-		return &payjet.Error{Gateway: "mellat", Op: "settle", GatewayCode: code}
+		return payjet.Rejected("mellat", "settle", code, "")
 	}
 	return nil
 }

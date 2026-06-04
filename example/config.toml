@@ -1,0 +1,54 @@
+# payjet example — microjet config.
+#
+# Override any value with env vars (prefix APP), e.g.:
+#   APP_SERVER_PORT=9090 APP_DATABASE_HOST=db.internal go run ./example
+# Select the gateway and supply credentials under [extra.payjet]; everything
+# else (server, database, logging) is plain microjet config.
+
+[app]
+namespace = "payjet"
+environment = "development"
+name = "payjet example shop"
+version = "1.0.0"
+debug = true
+
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[database]
+driver = "postgres"
+host = "localhost"
+port = 5432
+user = "postgres"
+password = "postgres"
+name = "payjet"
+sslMode = "disable"
+
+[log]
+level = "info"
+format = "text"
+
+# ── payjet gateway selection ──────────────────────────────────────────────────
+# gateway = virtual | zarinpal | idpay | saman | parsian | mellat | pasargad
+[extra.payjet]
+gateway = "virtual"
+
+[extra.payjet.zarinpal]
+merchantID = ""
+sandbox = true
+
+[extra.payjet.idpay]
+apiKey = ""
+sandbox = true
+
+[extra.payjet.saman]
+terminalID = ""
+
+[extra.payjet.parsian]
+loginAccount = ""
+
+[extra.payjet.mellat]
+terminalID = 0
+username = ""
+password = ""

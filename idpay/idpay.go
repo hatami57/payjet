@@ -139,8 +139,8 @@ func (g *Gateway) Request(ctx context.Context, p *payjet.Payment) (*payjet.Reque
 		return nil, err
 	}
 	if result.ID == "" {
-		return nil, &payjet.Error{Gateway: "idpay", Op: "request",
-			GatewayCode: strconv.Itoa(result.ErrorCode), Message: result.ErrorMessage}
+		return nil, payjet.Rejected("idpay", "request",
+			strconv.Itoa(result.ErrorCode), result.ErrorMessage)
 	}
 	return &payjet.RequestResult{
 		Token:      result.ID,
@@ -151,8 +151,8 @@ func (g *Gateway) Request(ctx context.Context, p *payjet.Payment) (*payjet.Reque
 
 func (g *Gateway) Verify(ctx context.Context, p *payjet.Payment, params map[string]string) (*payjet.VerifyResult, error) {
 	if params["status"] != callbackReadyStatus {
-		return nil, &payjet.Error{Gateway: "idpay", Op: "verify",
-			GatewayCode: params["status"], Message: "payment not ready for verify", Err: payjet.ErrCancelled}
+		return nil, payjet.Declined("idpay", "verify",
+			params["status"], "payment not ready for verify")
 	}
 	var result verifyResponse
 	if err := g.do(ctx, http.MethodPost, g.verifyURL, verifyBody{
@@ -162,8 +162,8 @@ func (g *Gateway) Verify(ctx context.Context, p *payjet.Payment, params map[stri
 		return nil, err
 	}
 	if result.Status != verifySuccessStatus {
-		return nil, &payjet.Error{Gateway: "idpay", Op: "verify",
-			GatewayCode: strconv.Itoa(result.Status), Message: result.ErrorMessage}
+		return nil, payjet.Rejected("idpay", "verify",
+			strconv.Itoa(result.Status), result.ErrorMessage)
 	}
 	return &payjet.VerifyResult{
 		RefID:      strconv.FormatInt(result.TrackID, 10),

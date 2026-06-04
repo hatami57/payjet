@@ -5,10 +5,11 @@ package payjet
 
 import (
 	"context"
-	"fmt"
 	"html/template"
 	"net/http"
 	"time"
+
+	"github.com/hatami57/microjet/core"
 )
 
 // DefaultTimeout is the timeout applied to the HTTP client each gateway uses by
@@ -61,13 +62,14 @@ type Payment struct {
 func (p *Payment) Validate() error {
 	switch {
 	case p == nil:
-		return fmt.Errorf("payjet: payment is nil")
+		return core.NewBadRequestError("payment", "payment is nil")
 	case p.Amount <= 0:
-		return fmt.Errorf("payjet: Amount must be positive, got %d", p.Amount)
+		return core.NewBadRequestError("payment", "Amount must be positive").
+			WithParams("amount", p.Amount)
 	case p.OrderID == "":
-		return fmt.Errorf("payjet: OrderID is required")
+		return core.NewBadRequestError("payment", "OrderID is required")
 	case p.CallbackURL == "":
-		return fmt.Errorf("payjet: CallbackURL is required")
+		return core.NewBadRequestError("payment", "CallbackURL is required")
 	}
 	return nil
 }

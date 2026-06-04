@@ -142,8 +142,8 @@ func (g *Gateway) Request(ctx context.Context, p *payjet.Payment) (*payjet.Reque
 		return nil, err
 	}
 	if result.Data.Code != 100 {
-		return nil, &payjet.Error{Gateway: "zarinpal", Op: "request",
-			GatewayCode: strconv.Itoa(result.Data.Code), Message: result.Data.Message}
+		return nil, payjet.Rejected("zarinpal", "request",
+			strconv.Itoa(result.Data.Code), result.Data.Message)
 	}
 	return &payjet.RequestResult{
 		Token:      result.Data.Authority,
@@ -154,7 +154,7 @@ func (g *Gateway) Request(ctx context.Context, p *payjet.Payment) (*payjet.Reque
 
 func (g *Gateway) Verify(ctx context.Context, p *payjet.Payment, params map[string]string) (*payjet.VerifyResult, error) {
 	if params["Status"] != "OK" {
-		return nil, &payjet.Error{Gateway: "zarinpal", Op: "verify", Err: payjet.ErrCancelled}
+		return nil, payjet.Declined("zarinpal", "verify", params["Status"], "")
 	}
 	var result verifyResponse
 	if err := g.postJSON(ctx, g.verifyURL, verifyBody{
@@ -166,8 +166,8 @@ func (g *Gateway) Verify(ctx context.Context, p *payjet.Payment, params map[stri
 	}
 	// 101 = already verified — idempotent success
 	if result.Data.Code != 100 && result.Data.Code != 101 {
-		return nil, &payjet.Error{Gateway: "zarinpal", Op: "verify",
-			GatewayCode: strconv.Itoa(result.Data.Code), Message: result.Data.Message}
+		return nil, payjet.Rejected("zarinpal", "verify",
+			strconv.Itoa(result.Data.Code), result.Data.Message)
 	}
 	return &payjet.VerifyResult{
 		RefID:      strconv.FormatInt(result.Data.RefID, 10),

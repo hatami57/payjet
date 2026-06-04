@@ -5,11 +5,11 @@ import (
 	"context"
 	"encoding/xml"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 
 	"github.com/majid/payjet"
+	"github.com/majid/payjet/internal/soap"
 )
 
 const (
@@ -100,21 +100,6 @@ func xmlNodeValue(data, localName, ns string) string {
 	return ""
 }
 
-func (g *Gateway) doSOAP(ctx context.Context, url, soapAction, envelope string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(envelope))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "text/xml; charset=UTF-8")
-	req.Header.Set("SOAPAction", soapAction)
-	resp, err := g.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	return io.ReadAll(resp.Body)
-}
-
 // ---- request / verify -------------------------------------------------------
 
 // CallbackOrderID returns the orderId Parsian echoes back in the callback.
@@ -144,7 +129,7 @@ func (g *Gateway) Request(ctx context.Context, p *payjet.Payment) (*payjet.Reque
 		p.Amount, xmlEscape(p.OrderID),
 		xmlEscape(p.CallbackURL), xmlEscape(p.Description),
 	)
-	data, err := g.doSOAP(ctx, g.requestURL, `"SalePaymentRequest"`, envelope)
+	data, err := soap.Post(ctx, g.client, g.requestURL, `"SalePaymentRequest"`, envelope)
 	if err != nil {
 		return nil, err
 	}
@@ -154,8 +139,7 @@ func (g *Gateway) Request(ctx context.Context, p *payjet.Payment) (*payjet.Reque
 	message := xmlNodeValue(raw, "Message", requestNS)
 
 	if status != "0" || token == "" {
-		return nil, &payjet.Error{Gateway: "parsian", Op: "request",
-			GatewayCode: status, Message: message}
+		return nil, payjet.Rejected("parsian", "request", status, message)
 	}
 	return &payjet.RequestResult{
 		Token:      token,
@@ -166,14 +150,13 @@ func (g *Gateway) Request(ctx context.Context, p *payjet.Payment) (*payjet.Reque
 
 func (g *Gateway) Verify(ctx context.Context, p *payjet.Payment, params map[string]string) (*payjet.VerifyResult, error) {
 	if params["status"] != "0" {
-		return nil, &payjet.Error{Gateway: "parsian", Op: "verify",
-			GatewayCode: params["status"], Err: payjet.ErrCancelled}
+		return nil, payjet.Declined("parsian", "verify", params["status"], "")
 	}
 	if params["token"] == "" {
-		return nil, &payjet.Error{Gateway: "parsian", Op: "verify", Message: "no token in callback"}
+		return nil, payjet.Fault("parsian", "verify", "no token in callback", nil)
 	}
 	if params["orderId"] != p.OrderID {
-		return nil, &payjet.Error{Gateway: "parsian", Op: "verify", Err: payjet.ErrOrderMismatch}
+		return nil, payjet.Mismatch("parsian", "verify", payjet.ErrOrderMismatch)
 	}
 	envelope := fmt.Sprintf(
 		`<?xml version="1.0" encoding="UTF-8"?>`+
@@ -186,7 +169,7 @@ func (g *Gateway) Verify(ctx context.Context, p *payjet.Payment, params map[stri
 			`</soapenv:Body></soapenv:Envelope>`,
 		verifyNS, xmlEscape(g.loginAccount), xmlEscape(params["token"]),
 	)
-	data, err := g.doSOAP(ctx, g.verifyURL, `"ConfirmPayment"`, envelope)
+	data, err := soap.Post(ctx, g.client, g.verifyURL, `"ConfirmPayment"`, envelope)
 	if err != nil {
 		return nil, err
 	}
@@ -195,7 +178,7 @@ func (g *Gateway) Verify(ctx context.Context, p *payjet.Payment, params map[stri
 	rrn := xmlNodeValue(raw, "RRN", verifyNS)
 
 	if status != "0" || rrn == "" {
-		return nil, &payjet.Error{Gateway: "parsian", Op: "verify", GatewayCode: status}
+		return nil, payjet.Rejected("parsian", "verify", status, "")
 	}
 	return &payjet.VerifyResult{
 		RefID:     rrn,

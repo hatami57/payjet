@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hatami57/microjet/core"
 	"github.com/majid/payjet"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -63,8 +64,11 @@ func TestRequestResult_Redirect_POST_EscapesFields(t *testing.T) {
 }
 
 func TestError_UnwrapsSentinel(t *testing.T) {
-	err := &payjet.Error{Gateway: "zarinpal", Op: "verify", GatewayCode: "-1", Err: payjet.ErrCancelled}
+	err := payjet.Declined("zarinpal", "verify", "-1", "")
+	// errors.Is still matches the sentinel (carried as the core.Error Inner)...
 	assert.True(t, errors.Is(err, payjet.ErrCancelled))
+	// ...and the error now carries a microjet category that maps to HTTP 409.
+	assert.True(t, core.IsBusinessError(err))
 	assert.Contains(t, err.Error(), "zarinpal")
 	assert.Contains(t, err.Error(), "-1")
 }

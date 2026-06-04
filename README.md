@@ -119,7 +119,9 @@ func main() {
 }
 ```
 
-A complete, runnable example using Gin lives in [`example/`](./example).
+A complete, runnable example — built on the microjet `host` stack with a
+PostgreSQL-backed store — lives in [`example/`](./example). See
+[Built on microjet](#built-on-microjet).
 
 ## Types
 
@@ -138,6 +140,16 @@ type Payment struct {
 
 Call `p.Validate()` to fail fast on missing required fields. `Request` already
 calls it for you before making any network request.
+
+Amounts are plain `int64` Rials. If your application already speaks microjet's
+currency-aware `money.Money`, bridge in and out with the helpers in
+[Built on microjet](#built-on-microjet):
+
+```go
+m := p.Money()                       // money.Money tagged IRR
+rials, err := payjet.ToRials(m)      // back to int64, validates currency + whole number
+amount := payjet.RialMoney(500_000)  // build a money.Money from Rials
+```
 
 ### RequestResult
 
@@ -185,14 +197,30 @@ case err != nil:
 }
 ```
 
-Gateway failures carry a structured `*payjet.Error` with the raw bank code:
+Gateway failures are structured [`*core.Error`](https://github.com/hatami57/microjet)
+values (from microjet — see [Built on microjet](#built-on-microjet)), so they
+carry a category, the gateway name (as the error `Subject`), and the raw bank
+code and operation (in `Params`). The category maps straight to an HTTP status
+through microjet's HTTP error middleware: declines and rejections are `Business`
+(409), bad caller input is `BadRequest` (400), and transport/parse faults are
+`Internal` (500). Inspect them with microjet's helpers:
 
 ```go
-var ge *payjet.Error
-if errors.As(err, &ge) {
-    log.Printf("%s %s failed: code=%s msg=%s", ge.Gateway, ge.Op, ge.GatewayCode, ge.Message)
+import "github.com/hatami57/microjet/core"
+
+if ce := core.GetError(err); ce != nil {
+    log.Printf("%s failed: code=%v msg=%s", ce.Subject, ce.Params["gatewayCode"], ce.Message)
+}
+switch {
+case core.IsBusinessError(err):   // bank declined / rejected → 409
+case core.IsBadRequestError(err): // invalid request → 400
+case core.IsInternalError(err):   // gateway fault → 500
 }
 ```
+
+The sentinels above still work: they are carried as the error's `Inner`, so
+`errors.Is(err, payjet.ErrCancelled)` and the category checks both hold on the
+same error.
 
 ## Callback lookup
 
@@ -248,6 +276,28 @@ res, _ := gw.Request(ctx, payment)
 params := gw.SimulatePayment(payment.OrderID, true) // true = pay, false = cancel
 result, _ := gw.Verify(ctx, payment, params)
 ```
+
+## Built on microjet
+
+payjet builds on [microjet](https://github.com/hatami57/microjet) instead of
+reinventing the same infrastructure:
+
+- **Errors** — gateway failures are microjet `core.Error` values, so they carry
+  a category that maps to an HTTP status and serialize to a structured JSON body
+  through microjet's HTTP error middleware. See [Errors](#errors).
+- **Money** — `payjet.RialMoney`, `payjet.ToRials`, and the `Money()` accessors
+  bridge `int64` Rials to microjet's currency-aware `money.Money` (`CurrencyIRR`).
+- **Example** — [`example/`](./example) runs on the microjet `host` orchestrator:
+  TOML config (`config.toml`, gateway selected under `[extra.payjet]`), a
+  `postgres.Table[PaymentRecord]` store, structured `slog` logging, the built-in
+  gin server with health/logging/recovery middleware, and graceful shutdown —
+  the whole app is one `host.MustNew().WithPostgreSQL().WithHTTPServer(...).MustRun()`
+  chain.
+
+Because microjet's sub-packages are not yet published, payjet's `go.mod` uses
+`replace` directives pointing at a sibling `../microjet` checkout. To consume
+payjet via `go get`, tag and publish the microjet modules first, then drop the
+replaces.
 
 ## License
 
