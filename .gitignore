@@ -1,0 +1,33 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/payjet
+/example/example
+
+# Test & coverage output
+*.test
+*.out
+coverage.*
+
+# Go workspace / vendoring
+go.work
+go.work.sum
+/vendor/
+
+# Environment & secrets (gateway credentials)
+.env
+.env.*
+*.local
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
