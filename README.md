@@ -288,15 +288,16 @@ reinventing the same infrastructure:
 - **Money** — `payjet.RialMoney`, `payjet.ToRials`, and the `Money()` accessors
   bridge `int64` Rials to microjet's currency-aware `money.Money` (`CurrencyIRR`).
 - **Example** — [`example/`](./example) runs on the microjet `host` orchestrator:
-  TOML config (`config.toml`, gateway selected under `[extra.payjet]`), a
-  `postgres.Table[PaymentRecord]` store, structured `slog` logging, the built-in
+  TOML config (`config.toml`, gateway selected under `[payjet]`), a
+  `gormx.Table[PaymentRecord]` store, structured `slog` logging, the built-in
   gin server with health/logging/recovery middleware, and graceful shutdown —
-  the whole app is one `host.MustNew().WithPostgreSQL().WithHTTPServer(...).MustRun()`
+  the whole app is one
+  `host.MustNew().Configure(cfg).WithDatabase(postgres.Driver()).WithHTTPServer(...).MustRun()`
   chain.
 
-Because microjet's sub-packages are not yet published, payjet's `go.mod` uses
-`replace` directives pointing at a sibling `../microjet` checkout. To consume
-payjet via `go get`, tag and publish the microjet modules first, then drop the
+payjet pins microjet's modules at `v0.18.0` and uses `replace` directives in
+`go.mod` to build against a sibling `../microjet` checkout during development.
+To consume payjet via `go get` against published microjet modules, drop the
 replaces.
 
 ## License

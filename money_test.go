@@ -3,8 +3,8 @@ package payjet_test
 import (
 	"testing"
 
-	"github.com/hatami57/microjet/core"
-	"github.com/hatami57/microjet/types/money"
+	"github.com/hatami57/microjet/core/errorx"
+	"github.com/hatami57/microjet/core/types/money"
 	"github.com/majid/payjet"
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
@@ -23,13 +23,13 @@ func TestRialMoneyRoundTrip(t *testing.T) {
 func TestToRialsRejectsWrongCurrency(t *testing.T) {
 	_, err := payjet.ToRials(money.Money{Value: decimal.NewFromInt(100), CurrencyCode: "USD"})
 	require.Error(t, err)
-	assert.True(t, core.IsBadRequestError(err))
+	assert.True(t, errorx.IsBadRequestError(err))
 }
 
 func TestToRialsRejectsFraction(t *testing.T) {
 	_, err := payjet.ToRials(money.Money{Value: decimal.NewFromFloat(10.5), CurrencyCode: payjet.CurrencyIRR})
 	require.Error(t, err)
-	assert.True(t, core.IsBadRequestError(err))
+	assert.True(t, errorx.IsBadRequestError(err))
 }
 
 func TestPaymentAndVerifyMoney(t *testing.T) {

@@ -1,10 +1,10 @@
 // Example application demonstrating payjet built on the microjet stack.
 //
 // It uses microjet's host orchestrator (config, logging, graceful shutdown),
-// a PostgreSQL-backed payment store via postgres.Table[T], and the gin router
+// a PostgreSQL-backed payment store via gormx.Table[T], and the gin router
 // microjet's HTTP server already wires with logging/recovery/health middleware.
 //
-// Configure the gateway and credentials in config.toml under [extra.payjet],
+// Configure the gateway and credentials in config.toml under [payjet],
 // or override anything via env vars (APP_ prefix). The default gateway is the
 // virtual one, so the app runs end-to-end with no real bank — but it does need
 // a PostgreSQL database matching the [database] section.
@@ -21,9 +21,11 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/hatami57/microjet/core"
+	"github.com/hatami57/microjet/core/configx"
+	"github.com/hatami57/microjet/core/errorx"
+	"github.com/hatami57/microjet/gormx"
+	"github.com/hatami57/microjet/gormx/postgres"
 	"github.com/hatami57/microjet/host"
-	"github.com/hatami57/microjet/postgres"
 	"github.com/majid/payjet"
 	"github.com/majid/payjet/idpay"
 	"github.com/majid/payjet/mellat"
@@ -53,7 +55,7 @@ type PaymentRecord struct {
 
 // store wraps the generic microjet table with payment-specific lookups.
 type store struct {
-	table *postgres.Table[PaymentRecord]
+	table *gormx.Table[PaymentRecord]
 }
 
 func (s *store) save(ctx context.Context, r *PaymentRecord) error {
@@ -72,29 +74,38 @@ func (s *store) load(ctx context.Context, key string) (*PaymentRecord, error) {
 	return s.table.Find(ctx, "token = ?", key)
 }
 
-// ── gateway configuration (read from [extra.payjet]) ─────────────────────────
+// ── gateway configuration (read from [payjet]) ───────────────────────────────
 
 type payjetConfig struct {
-	Gateway  string `json:"gateway"`
+	Gateway  string `mapstructure:"gateway"`
 	Zarinpal struct {
-		MerchantID string `json:"merchantID"`
-		Sandbox    bool   `json:"sandbox"`
-	} `json:"zarinpal"`
+		MerchantID string `mapstructure:"merchantID"`
+		Sandbox    bool   `mapstructure:"sandbox"`
+	} `mapstructure:"zarinpal"`
 	IDPay struct {
-		APIKey  string `json:"apiKey"`
-		Sandbox bool   `json:"sandbox"`
-	} `json:"idpay"`
+		APIKey  string `mapstructure:"apiKey"`
+		Sandbox bool   `mapstructure:"sandbox"`
+	} `mapstructure:"idpay"`
 	Saman struct {
-		TerminalID string `json:"terminalID"`
-	} `json:"saman"`
+		TerminalID string `mapstructure:"terminalID"`
+	} `mapstructure:"saman"`
 	Parsian struct {
-		LoginAccount string `json:"loginAccount"`
-	} `json:"parsian"`
+		LoginAccount string `mapstructure:"loginAccount"`
+	} `mapstructure:"parsian"`
 	Mellat struct {
-		TerminalID int64  `json:"terminalID"`
-		Username   string `json:"username"`
-		Password   string `json:"password"`
-	} `json:"mellat"`
+		TerminalID int64  `mapstructure:"terminalID"`
+		Username   string `mapstructure:"username"`
+		Password   string `mapstructure:"password"`
+	} `mapstructure:"mellat"`
+}
+
+// ReadConfig implements configx.Configurable, populating the gateway selection
+// and credentials from the [payjet] section of the config (env-overridable via
+// the APP_PAYJET_* prefix). It defaults to the virtual gateway so the app boots
+// with no real bank configured.
+func (c *payjetConfig) ReadConfig(r configx.Reader) error {
+	r.SetDefault("payjet.gateway", "virtual")
+	return r.Read("payjet", c)
 }
 
 // buildGateway selects and constructs the gateway from config. For the virtual
@@ -103,7 +114,7 @@ func buildGateway(cfg payjetConfig, baseURL string, r *gin.Engine) (payjet.Gatew
 	switch cfg.Gateway {
 	case "zarinpal":
 		if cfg.Zarinpal.MerchantID == "" {
-			return nil, core.NewBadRequestError("config", "zarinpal.merchantID is required")
+			return nil, errorx.NewBadRequestError("config", "zarinpal.merchantID is required")
 		}
 		var opts []zarinpal.Option
 		if cfg.Zarinpal.Sandbox {
@@ -113,7 +124,7 @@ func buildGateway(cfg payjetConfig, baseURL string, r *gin.Engine) (payjet.Gatew
 
 	case "idpay":
 		if cfg.IDPay.APIKey == "" {
-			return nil, core.NewBadRequestError("config", "idpay.apiKey is required")
+			return nil, errorx.NewBadRequestError("config", "idpay.apiKey is required")
 		}
 		var opts []idpay.Option
 		if cfg.IDPay.Sandbox {
@@ -123,19 +134,19 @@ func buildGateway(cfg payjetConfig, baseURL string, r *gin.Engine) (payjet.Gatew
 
 	case "saman":
 		if cfg.Saman.TerminalID == "" {
-			return nil, core.NewBadRequestError("config", "saman.terminalID is required")
+			return nil, errorx.NewBadRequestError("config", "saman.terminalID is required")
 		}
 		return saman.New(cfg.Saman.TerminalID), nil
 
 	case "parsian":
 		if cfg.Parsian.LoginAccount == "" {
-			return nil, core.NewBadRequestError("config", "parsian.loginAccount is required")
+			return nil, errorx.NewBadRequestError("config", "parsian.loginAccount is required")
 		}
 		return parsian.New(cfg.Parsian.LoginAccount), nil
 
 	case "mellat":
 		if cfg.Mellat.TerminalID == 0 {
-			return nil, core.NewBadRequestError("config", "mellat.terminalID is required")
+			return nil, errorx.NewBadRequestError("config", "mellat.terminalID is required")
 		}
 		return mellat.New(mellat.Config{
 			TerminalID: cfg.Mellat.TerminalID,
@@ -153,29 +164,28 @@ func buildGateway(cfg payjetConfig, baseURL string, r *gin.Engine) (payjet.Gatew
 
 // ── route registration & handlers ────────────────────────────────────────────
 
-func registerRoutes(app *host.App) error {
-	cfg, err := core.GetExtra[payjetConfig](app.Config, "payjet")
-	if err != nil {
-		return fmt.Errorf("reading [extra.payjet] config: %w", err)
+func registerRoutes(cfg *payjetConfig) host.HandlerFunc {
+	return func(app *host.App) error {
+		// By route-registration time the HTTP server's config has been read, so
+		// Addr() reflects the configured host:port.
+		baseURL := "http://" + app.HTTPServer.Addr()
+		r := app.HTTPServer.Router
+
+		gw, err := buildGateway(*cfg, baseURL, r)
+		if err != nil {
+			return err
+		}
+		app.Logger.Info("payjet gateway ready", "gateway", cfg.Gateway)
+
+		st := &store{table: gormx.NewTable[PaymentRecord](app.DB())}
+
+		r.GET("/", indexHandler)
+		r.POST("/checkout", checkoutHandler(app, gw, st, baseURL))
+		r.GET("/payment/callback", callbackHandler(app, gw, st))
+		r.POST("/payment/callback", callbackHandler(app, gw, st))
+		r.GET("/payment/result", resultHandler)
+		return nil
 	}
-
-	baseURL := fmt.Sprintf("http://localhost:%d", app.Config.Server.Port)
-	r := app.HTTPServer.Router
-
-	gw, err := buildGateway(cfg, baseURL, r)
-	if err != nil {
-		return err
-	}
-	app.Logger.Info("payjet gateway ready", "gateway", cfg.Gateway)
-
-	st := &store{table: postgres.NewTable[PaymentRecord](app.DB())}
-
-	r.GET("/", indexHandler)
-	r.POST("/checkout", checkoutHandler(app, gw, st, baseURL))
-	r.GET("/payment/callback", callbackHandler(app, gw, st))
-	r.POST("/payment/callback", callbackHandler(app, gw, st))
-	r.GET("/payment/result", resultHandler)
-	return nil
 }
 
 // POST /checkout — creates a payment, persists it, and redirects to the gateway.
@@ -284,10 +294,13 @@ func callbackHandler(app *host.App, gw payjet.Gateway, st *store) gin.HandlerFun
 // ── main ─────────────────────────────────────────────────────────────────────
 
 func main() {
+	cfg := &payjetConfig{}
+
 	host.MustNew().
-		WithPostgreSQL().
+		Configure(cfg). // read [payjet] into cfg before services start
+		WithDatabase(postgres.Driver()).
 		Setup(func(a *host.App) error { return a.DB().AutoMigrate(&PaymentRecord{}) }).
-		WithHTTPServer(registerRoutes).
+		WithHTTPServer(registerRoutes(cfg)).
 		MustRun() // inits services, starts HTTP, blocks until signal, then shuts down
 }
 

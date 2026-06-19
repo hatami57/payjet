@@ -2,7 +2,7 @@
 // that talk to Shaparak's XML web services (Mellat, Parsian). It owns only the
 // transport concerns common to every SOAP call — POSTing an envelope, setting
 // the SOAPAction header, reading the body, and turning HTTP and soap:Fault
-// failures into structured *core.Error values. Each gateway still builds its own
+// failures into structured *errorx.Error values. Each gateway still builds its own
 // envelope and parses its own response, because those differ per bank.
 //
 // It lives in internal/ on purpose: SOAP is niche, so it is a payjet
@@ -18,36 +18,36 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/hatami57/microjet/core"
+	"github.com/hatami57/microjet/core/errorx"
 )
 
 // Post sends envelope to url as a SOAP 1.1 request using httpClient. action is
 // written to the SOAPAction header verbatim (callers pass exactly what their
 // bank expects — a bare operation name, a namespaced URL, quoted or not). On a
-// non-2xx response or a soap:Fault it returns a *core.Error (Internal); on
+// non-2xx response or a soap:Fault it returns a *errorx.Error (Internal); on
 // success it returns the raw response body for the caller to parse.
 func Post(ctx context.Context, httpClient *http.Client, url, action, envelope string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(envelope))
 	if err != nil {
-		return nil, core.NewInternalError("soap", "building request failed").WithInner(err)
+		return nil, errorx.NewInternalError("soap", "building request failed").WithInner(err)
 	}
 	req.Header.Set("Content-Type", "text/xml; charset=utf-8")
 	req.Header.Set("SOAPAction", action)
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return nil, core.NewInternalError("soap", "request failed").
+		return nil, errorx.NewInternalError("soap", "request failed").
 			WithParams("url", url).WithInner(err)
 	}
 	defer resp.Body.Close()
 
 	data, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, core.NewInternalError("soap", fmt.Sprintf("upstream returned %d", resp.StatusCode)).
+		return nil, errorx.NewInternalError("soap", fmt.Sprintf("upstream returned %d", resp.StatusCode)).
 			WithParams("status", resp.StatusCode, "body", string(data))
 	}
 	if code, str, ok := fault(data); ok {
-		return nil, core.NewInternalError("soap", "SOAP fault").
+		return nil, errorx.NewInternalError("soap", "SOAP fault").
 			WithParams("faultcode", code, "faultstring", str, "action", action)
 	}
 	return data, nil

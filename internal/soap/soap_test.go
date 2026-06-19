@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/hatami57/microjet/core"
+	"github.com/hatami57/microjet/core/errorx"
 )
 
 func TestPostSendsEnvelopeAndActionVerbatim(t *testing.T) {
@@ -55,10 +55,10 @@ func TestPostDetectsFault(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for SOAP fault")
 	}
-	if !core.IsInternalError(err) {
+	if !errorx.IsInternalError(err) {
 		t.Errorf("error type = %v, want Internal", err)
 	}
-	if ce := core.GetError(err); ce == nil || ce.Params["faultstring"] != "bad request" {
+	if ce := errorx.GetError(err); ce == nil || ce.Params["faultstring"] != "bad request" {
 		t.Errorf("params = %+v, want faultstring 'bad request'", ce)
 	}
 }

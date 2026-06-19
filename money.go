@@ -1,8 +1,8 @@
 package payjet
 
 import (
-	"github.com/hatami57/microjet/core"
-	"github.com/hatami57/microjet/types/money"
+	"github.com/hatami57/microjet/core/errorx"
+	"github.com/hatami57/microjet/core/types/money"
 )
 
 // CurrencyIRR is the ISO 4217 code for the Iranian Rial. payjet works in Rials
@@ -23,11 +23,11 @@ func RialMoney(rials int64) money.Money {
 // part (Rials have no sub-unit), so callers fail fast on misconfigured amounts.
 func ToRials(m money.Money) (int64, error) {
 	if m.CurrencyCode != CurrencyIRR {
-		return 0, core.NewBadRequestError("amount", "currency must be IRR").
+		return 0, errorx.NewBadRequestError("amount", "currency must be IRR").
 			WithParams("currencyCode", string(m.CurrencyCode))
 	}
 	if !m.Value.Equal(m.Value.Truncate(0)) {
-		return 0, core.NewBadRequestError("amount", "Rial amount must be a whole number").
+		return 0, errorx.NewBadRequestError("amount", "Rial amount must be a whole number").
 			WithParams("value", m.Value.String())
 	}
 	return m.MinorUnits(), nil

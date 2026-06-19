@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/hatami57/microjet/core"
+	"github.com/hatami57/microjet/core/errorx"
 )
 
 // DefaultTimeout is the timeout applied to the HTTP client each gateway uses by
@@ -62,14 +62,14 @@ type Payment struct {
 func (p *Payment) Validate() error {
 	switch {
 	case p == nil:
-		return core.NewBadRequestError("payment", "payment is nil")
+		return errorx.NewBadRequestError("payment", "payment is nil")
 	case p.Amount <= 0:
-		return core.NewBadRequestError("payment", "Amount must be positive").
+		return errorx.NewBadRequestError("payment", "Amount must be positive").
 			WithParams("amount", p.Amount)
 	case p.OrderID == "":
-		return core.NewBadRequestError("payment", "OrderID is required")
+		return errorx.NewBadRequestError("payment", "OrderID is required")
 	case p.CallbackURL == "":
-		return core.NewBadRequestError("payment", "CallbackURL is required")
+		return errorx.NewBadRequestError("payment", "CallbackURL is required")
 	}
 	return nil
 }
