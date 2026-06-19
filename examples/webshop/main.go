@@ -23,7 +23,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/hatami57/microjet/core/configx"
 	"github.com/hatami57/microjet/core/errorx"
-	"github.com/hatami57/microjet/gormx"
 	"github.com/hatami57/microjet/gormx/postgres"
 	"github.com/hatami57/microjet/host"
 	"github.com/majid/payjet"
@@ -36,42 +35,21 @@ import (
 )
 
 // ── persistence ──────────────────────────────────────────────────────────────
+//
+// This example does not hand-roll any storage: payjet.Module() registers the
+// default gormx-backed PaymentStore and TransactionStore, which persist into the
+// host's database (the [database] section). Handlers resolve those interfaces
+// from the service container and use them directly.
 
-// PaymentRecord is the GORM entity backing the payment store. It is keyed by the
-// merchant OrderID and also indexes the gateway Token, so gateways that echo the
-// order ID in their callback and gateways that only echo a token (Zarinpal) can
-// both be looked up via Gateway.CallbackOrderID.
-type PaymentRecord struct {
-	OrderID     string `gorm:"primaryKey"`
-	Token       string `gorm:"index"`
-	Amount      int64  // Rials
-	CallbackURL string
-	Status      string // pending | succeeded | failed
-	RefID       string
-	CardNumber  string
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
-}
-
-// store wraps the generic microjet table with payment-specific lookups.
-type store struct {
-	table *gormx.Table[PaymentRecord]
-}
-
-func (s *store) save(ctx context.Context, r *PaymentRecord) error {
-	return s.table.Upsert(ctx, r)
-}
-
-// load finds a payment by either its OrderID or its gateway Token.
-func (s *store) load(ctx context.Context, key string) (*PaymentRecord, error) {
-	rec, err := s.table.Find(ctx, "order_id = ?", key)
-	if err != nil {
-		return nil, err
+// loadPayment finds a stored payment by either its OrderID or its gateway Token,
+// covering gateways that echo the order ID and ones that echo only a token
+// (Zarinpal), as reported by Gateway.CallbackOrderID.
+func loadPayment(ctx context.Context, ps payjet.PaymentStore, key string) (*payjet.StoredPayment, error) {
+	rec, err := ps.GetPayment(ctx, key)
+	if err != nil || rec != nil {
+		return rec, err
 	}
-	if rec != nil {
-		return rec, nil
-	}
-	return s.table.Find(ctx, "token = ?", key)
+	return ps.GetPaymentByToken(ctx, key)
 }
 
 // ── gateway configuration (read from [payjet]) ───────────────────────────────
@@ -177,19 +155,22 @@ func registerRoutes(cfg *payjetConfig) host.HandlerFunc {
 		}
 		app.Logger.Info("payjet gateway ready", "gateway", cfg.Gateway)
 
-		st := &store{table: gormx.NewTable[PaymentRecord](app.DB())}
+		// The default stores registered by payjet.Module() are resolved from the
+		// service container — no storage code to write or migrations to run here.
+		ps := host.MustResolveService[payjet.PaymentStore](app)
+		ts := host.MustResolveService[payjet.TransactionStore](app)
 
 		r.GET("/", indexHandler)
-		r.POST("/checkout", checkoutHandler(app, gw, st, baseURL))
-		r.GET("/payment/callback", callbackHandler(app, gw, st))
-		r.POST("/payment/callback", callbackHandler(app, gw, st))
+		r.POST("/checkout", checkoutHandler(app, gw, ps, cfg.Gateway, baseURL))
+		r.GET("/payment/callback", callbackHandler(app, gw, ps, ts, cfg.Gateway))
+		r.POST("/payment/callback", callbackHandler(app, gw, ps, ts, cfg.Gateway))
 		r.GET("/payment/result", resultHandler)
 		return nil
 	}
 }
 
 // POST /checkout — creates a payment, persists it, and redirects to the gateway.
-func checkoutHandler(app *host.App, gw payjet.Gateway, st *store, baseURL string) gin.HandlerFunc {
+func checkoutHandler(app *host.App, gw payjet.Gateway, ps payjet.PaymentStore, gateway, baseURL string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ctx := c.Request.Context()
 		orderID := fmt.Sprintf("order-%d", time.Now().UnixMilli())
@@ -207,12 +188,8 @@ func checkoutHandler(app *host.App, gw payjet.Gateway, st *store, baseURL string
 			"currency", p.Money().CurrencyCode,
 		)
 
-		if err := st.save(ctx, &PaymentRecord{
-			OrderID:     p.OrderID,
-			Amount:      p.Amount,
-			CallbackURL: p.CallbackURL,
-			Status:      "pending",
-		}); err != nil {
+		sp := payjet.NewStoredPayment(gateway, p)
+		if err := ps.SavePayment(ctx, sp); err != nil {
 			app.Logger.Error("save payment failed", "orderID", orderID, "error", err)
 			c.Redirect(http.StatusFound, "/payment/result?status=error&msg=internal+error")
 			return
@@ -227,13 +204,8 @@ func checkoutHandler(app *host.App, gw payjet.Gateway, st *store, baseURL string
 
 		// Record the token so a token-only callback (Zarinpal) can be matched.
 		if res.Token != "" {
-			_ = st.save(ctx, &PaymentRecord{
-				OrderID:     p.OrderID,
-				Token:       res.Token,
-				Amount:      p.Amount,
-				CallbackURL: p.CallbackURL,
-				Status:      "pending",
-			})
+			sp.Token = res.Token
+			_ = ps.SavePayment(ctx, sp)
 		}
 
 		// One call handles both GET redirects and POST self-submitting forms.
@@ -245,13 +217,13 @@ func checkoutHandler(app *host.App, gw payjet.Gateway, st *store, baseURL string
 }
 
 // GET|POST /payment/callback — the bank returns the user here after payment.
-func callbackHandler(app *host.App, gw payjet.Gateway, st *store) gin.HandlerFunc {
+func callbackHandler(app *host.App, gw payjet.Gateway, ps payjet.PaymentStore, ts payjet.TransactionStore, gateway string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ctx := c.Request.Context()
 		params := payjet.ParseCallback(c.Request)
 		key := gw.CallbackOrderID(params)
 
-		rec, err := st.load(ctx, key)
+		rec, err := loadPayment(ctx, ps, key)
 		if err != nil {
 			app.Logger.Error("load payment failed", "key", key, "error", err)
 			c.Redirect(http.StatusFound, "/payment/result?status=error&msg=internal+error")
@@ -265,8 +237,7 @@ func callbackHandler(app *host.App, gw payjet.Gateway, st *store) gin.HandlerFun
 		p := &payjet.Payment{OrderID: rec.OrderID, Amount: rec.Amount, CallbackURL: rec.CallbackURL}
 		result, err := gw.Verify(ctx, p, params)
 		if err != nil {
-			rec.Status = "failed"
-			_ = st.save(ctx, rec)
+			_ = ps.SetStatus(ctx, rec.OrderID, payjet.StatusFailed)
 			// A user cancelling is a normal flow, not a system failure.
 			if errors.Is(err, payjet.ErrCancelled) {
 				c.Redirect(http.StatusFound, "/payment/result?status=failed")
@@ -277,11 +248,12 @@ func callbackHandler(app *host.App, gw payjet.Gateway, st *store) gin.HandlerFun
 			return
 		}
 
-		rec.Status = "succeeded"
-		rec.RefID = result.RefID
-		rec.CardNumber = result.CardNumber
-		if err := st.save(ctx, rec); err != nil {
+		// Mark the order succeeded and append the verified transaction.
+		if err := ps.SetStatus(ctx, rec.OrderID, payjet.StatusSucceeded); err != nil {
 			app.Logger.Error("update payment failed", "orderID", rec.OrderID, "error", err)
+		}
+		if err := ts.SaveTransaction(ctx, payjet.NewTransaction(gateway, result)); err != nil {
+			app.Logger.Error("save transaction failed", "orderID", rec.OrderID, "error", err)
 		}
 
 		app.Logger.Info("payment succeeded",
@@ -299,7 +271,7 @@ func main() {
 	host.MustNew().
 		Configure(cfg). // read [payjet] into cfg before services start
 		WithDatabase(postgres.Driver()).
-		Setup(func(a *host.App) error { return a.DB().AutoMigrate(&PaymentRecord{}) }).
+		WithModule(payjet.Module()). // registers + migrates the default stores
 		WithHTTPServer(registerRoutes(cfg)).
 		MustRun() // inits services, starts HTTP, blocks until signal, then shuts down
 }

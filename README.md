@@ -119,9 +119,9 @@ func main() {
 }
 ```
 
-A complete, runnable example — built on the microjet `host` stack with a
-PostgreSQL-backed store — lives in [`example/`](./example). See
-[Built on microjet](#built-on-microjet).
+Runnable examples live in [`examples/`](./examples), from a complete
+PostgreSQL-backed web shop to focused, dependency-free demos. See
+[Examples](#examples).
 
 ## Types
 
@@ -197,7 +197,7 @@ case err != nil:
 }
 ```
 
-Gateway failures are structured [`*core.Error`](https://github.com/hatami57/microjet)
+Gateway failures are structured [`*errorx.Error`](https://github.com/hatami57/microjet)
 values (from microjet — see [Built on microjet](#built-on-microjet)), so they
 carry a category, the gateway name (as the error `Subject`), and the raw bank
 code and operation (in `Params`). The category maps straight to an HTTP status
@@ -206,15 +206,15 @@ through microjet's HTTP error middleware: declines and rejections are `Business`
 `Internal` (500). Inspect them with microjet's helpers:
 
 ```go
-import "github.com/hatami57/microjet/core"
+import "github.com/hatami57/microjet/core/errorx"
 
-if ce := core.GetError(err); ce != nil {
+if ce := errorx.GetError(err); ce != nil {
     log.Printf("%s failed: code=%v msg=%s", ce.Subject, ce.Params["gatewayCode"], ce.Message)
 }
 switch {
-case core.IsBusinessError(err):   // bank declined / rejected → 409
-case core.IsBadRequestError(err): // invalid request → 400
-case core.IsInternalError(err):   // gateway fault → 500
+case errorx.IsBusinessError(err):   // bank declined / rejected → 409
+case errorx.IsBadRequestError(err): // invalid request → 400
+case errorx.IsInternalError(err):   // gateway fault → 500
 }
 ```
 
@@ -277,23 +277,98 @@ params := gw.SimulatePayment(payment.OrderID, true) // true = pay, false = cance
 result, _ := gw.Verify(ctx, payment, params)
 ```
 
+## Persistence
+
+payjet keeps storage behind two interfaces so you can use any backend, and ships
+gormx-backed defaults so you don't have to implement either when running on
+microjet's database stack.
+
+```go
+type PaymentStore interface {
+    SavePayment(ctx context.Context, p *StoredPayment) error
+    GetPayment(ctx context.Context, orderID string) (*StoredPayment, error)
+    GetPaymentByToken(ctx context.Context, token string) (*StoredPayment, error)
+    SetStatus(ctx context.Context, orderID string, status PaymentStatus) error
+}
+
+type TransactionStore interface {
+    SaveTransaction(ctx context.Context, t *Transaction) error
+    GetTransaction(ctx context.Context, orderID string) (*Transaction, error)
+    ListTransactions(ctx context.Context, orderID string) ([]*Transaction, error)
+}
+```
+
+`StoredPayment` is the order/intent (keyed by `OrderID`, indexed by gateway
+`Token` for token-only callbacks like Zarinpal); `Transaction` is the persisted
+outcome of a `Verify` (ref/trace number, masked card, amount, and the raw
+callback params for reconciliation). The helpers `payjet.NewStoredPayment` and
+`payjet.NewTransaction` build them from a `Payment` and a `VerifyResult`.
+
+### Default stores via the module
+
+`payjet.Module()` is a microjet module that registers the gormx-backed
+`PaymentStore` and `TransactionStore`. They share the host's `*gorm.DB`
+(`app.DB()`), so payments and transactions land in the same database as the rest
+of your app, and the module auto-migrates the `payjet_payments` and
+`payjet_transactions` tables — no storage code and no migrations to write:
+
+```go
+app := host.MustNew().
+    WithDatabase(postgres.Driver()).
+    WithModule(payjet.Module()).
+    MustRun()
+
+// resolve the stores anywhere from the service container:
+ps := host.MustResolveService[payjet.PaymentStore](app)
+ts := host.MustResolveService[payjet.TransactionStore](app)
+```
+
+### Bringing your own storage
+
+Implement either interface and substitute it without touching the rest:
+
+```go
+payjet.Module(
+    payjet.WithPaymentStore(myRedisPaymentStore),
+    payjet.WithTransactionStore(myMongoTxStore),
+)
+```
+
+A custom store is just a service: if it implements microjet's `Init`/`Setup`
+lifecycle it is wired the same way the defaults are.
+
+## Examples
+
+All examples live under [`examples/`](./examples). The focused ones need no
+database, no bank, and no HTTP server — just `go run .` in the directory:
+
+| Example | What it shows | Run |
+| --- | --- | --- |
+| [`virtual`](./examples/virtual) | The core `Gateway` flow end to end (Request → simulated payment → Verify) with the virtual gateway and the money helpers. | `go run ./examples/virtual` |
+| [`errors`](./examples/errors) | Inspecting failures: the `errorx` category helpers, the structured payload, and the `errors.Is` sentinels. | `go run ./examples/errors` |
+| [`storage`](./examples/storage) | Implementing `PaymentStore` and `TransactionStore` over your own backend (the "bring your own storage" path). | `go run ./examples/storage` |
+| [`webshop`](./examples/webshop) | A complete checkout app on the microjet `host`: any gateway via config, the default gormx stores via `payjet.Module()`, callbacks, and a PostgreSQL database. | needs PostgreSQL — see its `config.toml` |
+
 ## Built on microjet
 
 payjet builds on [microjet](https://github.com/hatami57/microjet) instead of
 reinventing the same infrastructure:
 
-- **Errors** — gateway failures are microjet `core.Error` values, so they carry
+- **Errors** — gateway failures are microjet `errorx.Error` values, so they carry
   a category that maps to an HTTP status and serialize to a structured JSON body
   through microjet's HTTP error middleware. See [Errors](#errors).
 - **Money** — `payjet.RialMoney`, `payjet.ToRials`, and the `Money()` accessors
   bridge `int64` Rials to microjet's currency-aware `money.Money` (`CurrencyIRR`).
-- **Example** — [`example/`](./example) runs on the microjet `host` orchestrator:
-  TOML config (`config.toml`, gateway selected under `[payjet]`), a
-  `gormx.Table[PaymentRecord]` store, structured `slog` logging, the built-in
-  gin server with health/logging/recovery middleware, and graceful shutdown —
-  the whole app is one
-  `host.MustNew().Configure(cfg).WithDatabase(postgres.Driver()).WithHTTPServer(...).MustRun()`
-  chain.
+- **Persistence** — the `PaymentStore` and `TransactionStore` interfaces let you
+  back payjet with any storage, while `payjet.Module()` wires gormx-backed
+  defaults that persist into the host's database. See [Persistence](#persistence).
+- **Examples** — [`examples/webshop`](./examples/webshop) runs on the microjet
+  `host` orchestrator: TOML config (`config.toml`, gateway selected under
+  `[payjet]`), the default payjet stores registered with `payjet.Module()`,
+  structured `slog` logging, the built-in gin server with health/logging/recovery
+  middleware, and graceful shutdown — the whole app is one
+  `host.MustNew().Configure(cfg).WithDatabase(postgres.Driver()).WithModule(payjet.Module()).WithHTTPServer(...).MustRun()`
+  chain. See [Examples](#examples) for the focused demos.
 
 payjet pins microjet's modules at `v0.18.0` and uses `replace` directives in
 `go.mod` to build against a sibling `../microjet` checkout during development.
