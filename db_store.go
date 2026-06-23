@@ -1,5 +1,5 @@
 // This file provides the default gormx-backed PaymentStore and TransactionStore.
-// They build on microjet's database stack: the shared *gorm.DB (app.DB()) and the
+// They build on microjet's database stack: the shared *gorm.DB (gormx.Of(app)) and the
 // generic gormx.Table helpers. Because they reuse the host's connection, payments
 // and transactions land in the same database as the rest of the application — no
 // second driver, no second handle, and nothing for the user to implement when the
@@ -36,10 +36,10 @@ func (d *dbPaymentStore) initDB(db *gorm.DB) {
 	d.table = gormx.NewTableFor[StoredPayment](&base)
 }
 
-func (d *dbPaymentStore) Init(app *host.App) error { d.initDB(app.DB()); return nil }
+func (d *dbPaymentStore) Init(app *host.App) error { d.initDB(gormx.Of(app)); return nil }
 
 func (d *dbPaymentStore) Setup(app *host.App) error {
-	return app.DB().AutoMigrate(&StoredPayment{})
+	return gormx.Of(app).AutoMigrate(&StoredPayment{})
 }
 
 func (d *dbPaymentStore) SavePayment(ctx context.Context, p *StoredPayment) error {
@@ -79,10 +79,10 @@ func (d *dbTransactionStore) initDB(db *gorm.DB) {
 	d.table = gormx.NewTableFor[Transaction](&base)
 }
 
-func (d *dbTransactionStore) Init(app *host.App) error { d.initDB(app.DB()); return nil }
+func (d *dbTransactionStore) Init(app *host.App) error { d.initDB(gormx.Of(app)); return nil }
 
 func (d *dbTransactionStore) Setup(app *host.App) error {
-	return app.DB().AutoMigrate(&Transaction{})
+	return gormx.Of(app).AutoMigrate(&Transaction{})
 }
 
 func (d *dbTransactionStore) SaveTransaction(ctx context.Context, t *Transaction) error {

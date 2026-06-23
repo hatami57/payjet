@@ -4,7 +4,7 @@ import "github.com/hatami57/microjet/host"
 
 // StoreModule registers payjet's persistence services — a PaymentStore and a
 // TransactionStore — with a microjet host app. By default it wires the
-// gormx-backed stores, which persist into the host's database (app.DB()), so an
+// gormx-backed stores, which persist into the host's database (gormx.Of(app)), so an
 // app that already configured a database gets payment/transaction storage with
 // nothing to implement. Substitute your own backend with WithPaymentStore /
 // WithTransactionStore.
@@ -30,7 +30,7 @@ func WithTransactionStore(s TransactionStore) ModuleOption {
 // resolve the stores anywhere from the service container:
 //
 //	host.MustNew().
-//	    WithDatabase(postgres.Driver()).
+//	    WithModule(gormx.Module(postgres.Driver())).
 //	    WithModule(payjet.Module()).
 //	    MustRun()
 //
@@ -50,7 +50,7 @@ func Module(opts ...ModuleOption) *StoreModule {
 // service lifecycle, so the gormx defaults receive the shared *gorm.DB during
 // Init and migrate their tables during Setup.
 func (m *StoreModule) Register(app *host.App) error {
-	app.ProvideService(host.ProvideType(m.paymentStore))
-	app.ProvideService(host.ProvideType(m.transactionStore))
+	host.ProvideService(app, m.paymentStore)
+	host.ProvideService(app, m.transactionStore)
 	return app.Err()
 }

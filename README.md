@@ -308,13 +308,13 @@ callback params for reconciliation). The helpers `payjet.NewStoredPayment` and
 
 `payjet.Module()` is a microjet module that registers the gormx-backed
 `PaymentStore` and `TransactionStore`. They share the host's `*gorm.DB`
-(`app.DB()`), so payments and transactions land in the same database as the rest
-of your app, and the module auto-migrates the `payjet_payments` and
+(`gormx.Of(app)`), so payments and transactions land in the same database as the
+rest of your app, and the module auto-migrates the `payjet_payments` and
 `payjet_transactions` tables — no storage code and no migrations to write:
 
 ```go
 app := host.MustNew().
-    WithDatabase(postgres.Driver()).
+    WithModule(gormx.Module(postgres.Driver())).
     WithModule(payjet.Module()).
     MustRun()
 
@@ -367,10 +367,10 @@ reinventing the same infrastructure:
   `[payjet]`), the default payjet stores registered with `payjet.Module()`,
   structured `slog` logging, the built-in gin server with health/logging/recovery
   middleware, and graceful shutdown — the whole app is one
-  `host.MustNew().Configure(cfg).WithDatabase(postgres.Driver()).WithModule(payjet.Module()).WithHTTPServer(...).MustRun()`
+  `host.MustNew().Configure(cfg).WithModule(gormx.Module(postgres.Driver())).WithModule(payjet.Module()).WithModule(httpx.Module()).Setup(...).MustRun()`
   chain. See [Examples](#examples) for the focused demos.
 
-payjet pins microjet's modules at `v0.18.0` and uses `replace` directives in
+payjet pins microjet's modules at `v0.19.0` and uses `replace` directives in
 `go.mod` to build against a sibling `../microjet` checkout during development.
 To consume payjet via `go get` against published microjet modules, drop the
 replaces.

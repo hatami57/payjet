@@ -23,8 +23,10 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/hatami57/microjet/core/configx"
 	"github.com/hatami57/microjet/core/errorx"
+	"github.com/hatami57/microjet/gormx"
 	"github.com/hatami57/microjet/gormx/postgres"
 	"github.com/hatami57/microjet/host"
+	"github.com/hatami57/microjet/httpx"
 	"github.com/majid/payjet"
 	"github.com/majid/payjet/idpay"
 	"github.com/majid/payjet/mellat"
@@ -146,8 +148,9 @@ func registerRoutes(cfg *payjetConfig) host.HandlerFunc {
 	return func(app *host.App) error {
 		// By route-registration time the HTTP server's config has been read, so
 		// Addr() reflects the configured host:port.
-		baseURL := "http://" + app.HTTPServer.Addr()
-		r := app.HTTPServer.Router
+		srv := httpx.Of(app)
+		baseURL := "http://" + srv.Addr()
+		r := srv.Router
 
 		gw, err := buildGateway(*cfg, baseURL, r)
 		if err != nil {
@@ -270,9 +273,10 @@ func main() {
 
 	host.MustNew().
 		Configure(cfg). // read [payjet] into cfg before services start
-		WithDatabase(postgres.Driver()).
+		WithModule(gormx.Module(postgres.Driver())).
 		WithModule(payjet.Module()). // registers + migrates the default stores
-		WithHTTPServer(registerRoutes(cfg)).
+		WithModule(httpx.Module()).  // installs the gin HTTP server
+		Setup(registerRoutes(cfg)).  // register routes after services init, before serving
 		MustRun() // inits services, starts HTTP, blocks until signal, then shuts down
 }
 
