@@ -47,11 +47,11 @@ func (d *dbPaymentStore) SavePayment(ctx context.Context, p *StoredPayment) erro
 }
 
 func (d *dbPaymentStore) GetPayment(ctx context.Context, orderID string) (*StoredPayment, error) {
-	return d.table.Find(ctx, "order_id = ?", orderID)
+	return d.table.First(ctx, "order_id = ?", orderID)
 }
 
 func (d *dbPaymentStore) GetPaymentByToken(ctx context.Context, token string) (*StoredPayment, error) {
-	return d.table.Find(ctx, "token = ?", token)
+	return d.table.First(ctx, "token = ?", token)
 }
 
 func (d *dbPaymentStore) SetStatus(ctx context.Context, orderID string, status PaymentStatus) error {
