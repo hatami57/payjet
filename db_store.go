@@ -55,7 +55,8 @@ func (d *dbPaymentStore) GetPaymentByToken(ctx context.Context, token string) (*
 }
 
 func (d *dbPaymentStore) SetStatus(ctx context.Context, orderID string, status PaymentStatus) error {
-	return d.table.UpdateMap(ctx, map[string]any{"status": status}, "order_id = ?", orderID)
+	_, err := d.table.UpdateMap(ctx, map[string]any{"status": status}, "order_id = ?", orderID)
+	return err
 }
 
 // ── transactions ──────────────────────────────────────────────────────────────
