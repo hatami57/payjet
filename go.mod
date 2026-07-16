@@ -4,12 +4,12 @@ go 1.26.2
 
 require (
 	github.com/gin-gonic/gin v1.12.0
-	github.com/hatami57/microjet/core v0.24.0
-	github.com/hatami57/microjet/gormx v0.24.0
-	github.com/hatami57/microjet/gormx/postgres v0.24.0
-	github.com/hatami57/microjet/gormx/sqlite v0.24.0
-	github.com/hatami57/microjet/host v0.24.0
-	github.com/hatami57/microjet/httpx v0.24.0
+	github.com/hatami57/microjet/core v0.30.0
+	github.com/hatami57/microjet/gormx v0.30.0
+	github.com/hatami57/microjet/gormx/postgres v0.30.0
+	github.com/hatami57/microjet/gormx/sqlite v0.30.0
+	github.com/hatami57/microjet/host v0.30.0
+	github.com/hatami57/microjet/httpx v0.30.0
 	github.com/shopspring/decimal v1.4.0
 	github.com/stretchr/testify v1.11.1
 	gorm.io/gorm v1.31.1
@@ -87,7 +87,7 @@ require (
 	github.com/prometheus/common v0.66.1 // indirect
 	github.com/prometheus/procfs v0.20.1 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
-	github.com/quic-go/quic-go v0.59.0 // indirect
+	github.com/quic-go/quic-go v0.59.1 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/sagikazarmark/locafero v0.12.0 // indirect
 	github.com/spf13/afero v1.15.0 // indirect

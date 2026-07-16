@@ -43,7 +43,8 @@ func (d *dbPaymentStore) Setup(app *host.App) error {
 }
 
 func (d *dbPaymentStore) SavePayment(ctx context.Context, p *StoredPayment) error {
-	return d.table.Upsert(ctx, p)
+	_, err := d.table.Upsert(ctx, p)
+	return err
 }
 
 func (d *dbPaymentStore) GetPayment(ctx context.Context, orderID string) (*StoredPayment, error) {
