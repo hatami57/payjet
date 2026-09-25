@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/hatami57/microjet/core/errorx"
+
 	"github.com/majid/payjet"
 	"github.com/majid/payjet/idpay"
 	"github.com/stretchr/testify/assert"
@@ -184,4 +186,90 @@ func TestWithoutSandbox_NoHeader(t *testing.T) {
 	gw := idpay.New("k", idpay.WithEndpoints(srv.URL, srv.URL))
 	_, _ = gw.Request(context.Background(), testPayment)
 	assert.Empty(t, got)
+}
+
+// readyCallback is IDPay's callback for a payment awaiting verification.
+func readyCallback() map[string]string {
+	return map[string]string{
+		"status": "10", "id": "tx-1", "track_id": "5", "order_id": testPayment.OrderID, "amount": "300000",
+	}
+}
+
+// IDPay documents the verify response with string-typed numbers.
+func TestVerify_DocumentedStringResponse(t *testing.T) {
+	var sent map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&sent)
+		w.Write([]byte(`{"status":"100","track_id":"10012","id":"tx-1","order_id":"order-99",` +
+			`"amount":"300000","payment":{"track_id":"888001","amount":"300000","card_no":"123456******1234"}}`))
+	}))
+	t.Cleanup(srv.Close)
+	gw := idpay.New("k", idpay.WithEndpoints(srv.URL, srv.URL))
+	p := *testPayment
+	p.Token = "tx-1"
+
+	res, err := gw.Verify(context.Background(), &p, readyCallback())
+
+	require.NoError(t, err)
+	assert.Equal(t, "10012", res.RefID)
+	assert.Equal(t, "123456******1234", res.CardNumber)
+	assert.False(t, res.AlreadyVerified)
+	assert.Equal(t, testPayment.OrderID, sent["order_id"])
+}
+
+func TestVerify_AlreadyVerified(t *testing.T) {
+	_, gw := newServer(t, nil, map[string]interface{}{"status": 101, "track_id": 7, "amount": 300000})
+
+	res, err := gw.Verify(context.Background(), testPayment, readyCallback())
+
+	require.NoError(t, err)
+	assert.True(t, res.AlreadyVerified)
+}
+
+func TestVerify_CallbackOrderMismatch(t *testing.T) {
+	_, gw := newServer(t, nil, map[string]interface{}{"status": 100, "track_id": 7})
+	params := readyCallback()
+	params["order_id"] = "another-order"
+
+	_, err := gw.Verify(context.Background(), testPayment, params)
+
+	assert.ErrorIs(t, err, payjet.ErrOrderMismatch)
+}
+
+func TestVerify_CallbackAmountMismatch(t *testing.T) {
+	_, gw := newServer(t, nil, map[string]interface{}{"status": 100, "track_id": 7})
+	params := readyCallback()
+	params["amount"] = "1000"
+
+	_, err := gw.Verify(context.Background(), testPayment, params)
+
+	assert.ErrorIs(t, err, payjet.ErrAmountMismatch)
+}
+
+func TestVerify_VerifiedAmountMismatch(t *testing.T) {
+	_, gw := newServer(t, nil, map[string]interface{}{"status": 100, "track_id": 7, "amount": "1000"})
+
+	_, err := gw.Verify(context.Background(), testPayment, readyCallback())
+
+	assert.ErrorIs(t, err, payjet.ErrAmountMismatch)
+}
+
+func TestVerify_TokenMismatch(t *testing.T) {
+	_, gw := newServer(t, nil, map[string]interface{}{"status": 100, "track_id": 7})
+	p := *testPayment
+	p.Token = "tx-issued-for-this-order"
+
+	_, err := gw.Verify(context.Background(), &p, readyCallback())
+
+	assert.ErrorIs(t, err, payjet.ErrTokenMismatch)
+}
+
+func TestVerify_ErrorResponseCarriesErrorCode(t *testing.T) {
+	_, gw := newServer(t, nil, map[string]interface{}{"error_code": 53, "error_message": "تایید پرداخت امکان پذیر نیست."})
+
+	_, err := gw.Verify(context.Background(), testPayment, readyCallback())
+
+	ce := errorx.GetError(err)
+	require.NotNil(t, ce)
+	assert.Equal(t, "53", ce.Params["gatewayCode"])
 }

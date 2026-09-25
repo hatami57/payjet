@@ -42,6 +42,20 @@ type StoredPayment struct {
 // TableName is the table the default store persists payments into.
 func (StoredPayment) TableName() string { return "payjet_payments" }
 
+// Payment rebuilds the Payment to pass to Gateway.Verify, including the Token
+// the gateway issued, so Verify can check the callback belongs to this payment.
+func (s *StoredPayment) Payment() *Payment {
+	return &Payment{
+		Amount:      s.Amount,
+		OrderID:     s.OrderID,
+		CallbackURL: s.CallbackURL,
+		Description: s.Description,
+		Mobile:      s.Mobile,
+		Email:       s.Email,
+		Token:       s.Token,
+	}
+}
+
 // NewStoredPayment builds a pending StoredPayment for the given gateway from a
 // Payment. Set Token afterwards (from RequestResult) before saving if the
 // gateway issues one.
@@ -101,7 +115,7 @@ type PaymentStore interface {
 	// GetPayment returns the payment with the given OrderID, or nil if none.
 	GetPayment(ctx context.Context, orderID string) (*StoredPayment, error)
 	// GetPaymentByToken returns the payment carrying the given gateway Token, or
-	// nil if none. Use it for gateways whose callback echoes only a token rather
+	// nil if none (always nil for an empty token). Use it for gateways whose callback echoes only a token rather
 	// than the merchant OrderID (e.g. Zarinpal).
 	GetPaymentByToken(ctx context.Context, token string) (*StoredPayment, error)
 	// SetStatus updates the status of the payment with the given OrderID.

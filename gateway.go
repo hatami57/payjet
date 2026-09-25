@@ -7,6 +7,7 @@ import (
 	"context"
 	"html/template"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/hatami57/microjet/core/errorx"
@@ -55,6 +56,11 @@ type Payment struct {
 	Description string
 	Mobile      string // optional
 	Email       string // optional
+	// Token is the RequestResult.Token issued for this payment. Request ignores
+	// it; set it when calling Verify so the gateway can check that the callback
+	// belongs to this payment and not to another one. Parsian and Pasargad
+	// require it; the other gateways check it when it is set.
+	Token string
 }
 
 // Validate reports whether the payment has the fields every gateway requires.
@@ -117,6 +123,27 @@ type VerifyResult struct {
 	OrderID    string
 	Amount     int64             // verified amount in Rials, when the gateway reports it
 	RawParams  map[string]string // the callback params, for auditing/reconciliation
+	// AlreadyVerified reports that the gateway had verified this payment before
+	// (e.g. Zarinpal code 101, Mellat code 43). The payment is genuine, but a
+	// replayed or retried callback lands here too, so fulfil the order only if
+	// it is not already fulfilled.
+	AlreadyVerified bool
+}
+
+// Param returns the callback field name from params, matching the key
+// case-insensitively when there is no exact match. Banks are inconsistent about
+// the casing of their callback fields (Parsian posts "Token" but documents
+// "token"), so gateways read every field through it.
+func Param(params map[string]string, name string) string {
+	if v, ok := params[name]; ok {
+		return v
+	}
+	for k, v := range params {
+		if strings.EqualFold(k, name) {
+			return v
+		}
+	}
+	return ""
 }
 
 // ParseCallback collects the callback fields from an HTTP request, merging URL

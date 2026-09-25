@@ -17,7 +17,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"html"
 	"net/http"
+	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -47,6 +50,9 @@ import (
 // covering gateways that echo the order ID and ones that echo only a token
 // (Zarinpal), as reported by Gateway.CallbackOrderID.
 func loadPayment(ctx context.Context, ps payjet.PaymentStore, key string) (*payjet.StoredPayment, error) {
+	if key == "" {
+		return nil, nil
+	}
 	rec, err := ps.GetPayment(ctx, key)
 	if err != nil || rec != nil {
 		return rec, err
@@ -176,7 +182,8 @@ func registerRoutes(cfg *payjetConfig) host.HandlerFunc {
 func checkoutHandler(app *host.App, gw payjet.Gateway, ps payjet.PaymentStore, gateway, baseURL string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ctx := c.Request.Context()
-		orderID := fmt.Sprintf("order-%d", time.Now().UnixMilli())
+		// Numeric, because Mellat and Parsian accept only numeric order IDs.
+		orderID := strconv.FormatInt(time.Now().UnixMilli(), 10)
 
 		p := &payjet.Payment{
 			OrderID:     orderID,
@@ -201,14 +208,20 @@ func checkoutHandler(app *host.App, gw payjet.Gateway, ps payjet.PaymentStore, g
 		res, err := gw.Request(ctx, p)
 		if err != nil {
 			app.Logger.Error("gateway request failed", "orderID", orderID, "error", err)
+			_ = ps.SetStatus(ctx, orderID, payjet.StatusFailed)
 			c.Redirect(http.StatusFound, "/payment/result?status=error&msg=gateway+error")
 			return
 		}
 
-		// Record the token so a token-only callback (Zarinpal) can be matched.
+		// Record the token: Verify checks the callback against it, and a
+		// token-only callback (Zarinpal) is matched by it.
 		if res.Token != "" {
 			sp.Token = res.Token
-			_ = ps.SavePayment(ctx, sp)
+			if err := ps.SavePayment(ctx, sp); err != nil {
+				app.Logger.Error("save payment token failed", "orderID", orderID, "error", err)
+				c.Redirect(http.StatusFound, "/payment/result?status=error&msg=internal+error")
+				return
+			}
 		}
 
 		// One call handles both GET redirects and POST self-submitting forms.
@@ -236,17 +249,30 @@ func callbackHandler(app *host.App, gw payjet.Gateway, ps payjet.PaymentStore, t
 			c.Redirect(http.StatusFound, "/payment/result?status=error&msg=order+not+found")
 			return
 		}
+		// Only a pending payment is verified. A replayed callback for a paid
+		// order must not fulfil it twice, and a forged decline must not fail it.
+		if rec.Status != payjet.StatusPending {
+			c.Redirect(http.StatusFound, "/payment/result?status=error&msg=payment+already+processed")
+			return
+		}
 
-		p := &payjet.Payment{OrderID: rec.OrderID, Amount: rec.Amount, CallbackURL: rec.CallbackURL}
-		result, err := gw.Verify(ctx, p, params)
+		// rec.Payment() carries the token Request issued, so Verify can reject
+		// a callback that belongs to a different payment.
+		result, err := gw.Verify(ctx, rec.Payment(), params)
 		if err != nil {
-			_ = ps.SetStatus(ctx, rec.OrderID, payjet.StatusFailed)
 			// A user cancelling is a normal flow, not a system failure.
 			if errors.Is(err, payjet.ErrCancelled) {
+				_ = ps.SetStatus(ctx, rec.OrderID, payjet.StatusFailed)
 				c.Redirect(http.StatusFound, "/payment/result?status=failed")
 				return
 			}
 			app.Logger.Error("verify failed", "orderID", rec.OrderID, "error", err)
+			// An internal fault (a timeout, an unreadable response) says nothing
+			// about the payment: the bank may have taken the money. Leave it
+			// pending so it can be verified again rather than marking it failed.
+			if !errorx.IsInternalError(err) {
+				_ = ps.SetStatus(ctx, rec.OrderID, payjet.StatusFailed)
+			}
 			c.Redirect(http.StatusFound, "/payment/result?status=failed")
 			return
 		}
@@ -262,7 +288,7 @@ func callbackHandler(app *host.App, gw payjet.Gateway, ps payjet.PaymentStore, t
 		app.Logger.Info("payment succeeded",
 			"orderID", result.OrderID, "refID", result.RefID, "card", result.CardNumber)
 		c.Redirect(http.StatusFound,
-			fmt.Sprintf("/payment/result?status=success&ref=%s", result.RefID))
+			"/payment/result?status=success&ref="+url.QueryEscape(result.RefID))
 	}
 }
 
@@ -277,7 +303,7 @@ func main() {
 		WithModule(payjet.Module()). // registers + migrates the default stores
 		WithModule(httpx.Module()).  // installs the gin HTTP server
 		Setup(registerRoutes(cfg)).  // register routes after services init, before serving
-		MustRun() // inits services, starts HTTP, blocks until signal, then shuts down
+		MustRun()                    // inits services, starts HTTP, blocks until signal, then shuts down
 }
 
 // ── static HTML pages ──────────────────────────────────────────────────────────
@@ -316,11 +342,11 @@ func resultHandler(c *gin.Context) {
 	var inner string
 	switch status {
 	case "success":
-		inner = fmt.Sprintf(`<div style="color:green"><h2>✓ پرداخت موفق</h2><p>کد پیگیری: <b>%s</b></p></div>`, ref)
+		inner = fmt.Sprintf(`<div style="color:green"><h2>✓ پرداخت موفق</h2><p>کد پیگیری: <b>%s</b></p></div>`, html.EscapeString(ref))
 	case "failed":
 		inner = `<div style="color:red"><h2>✗ پرداخت ناموفق</h2><p>لطفاً دوباره تلاش کنید.</p></div>`
 	default:
-		inner = fmt.Sprintf(`<div style="color:orange"><h2>خطا</h2><p>%s</p></div>`, msg)
+		inner = fmt.Sprintf(`<div style="color:orange"><h2>خطا</h2><p>%s</p></div>`, html.EscapeString(msg))
 	}
 
 	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(`<!DOCTYPE html>

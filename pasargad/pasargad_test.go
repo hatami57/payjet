@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hatami57/microjet/core/errorx"
+
 	"github.com/majid/payjet"
 	"github.com/majid/payjet/pasargad"
 	"github.com/stretchr/testify/assert"
@@ -26,6 +28,8 @@ type pasargadMock struct {
 	purchaseMsg   string
 	verifyCode    int
 	verifyMsg     string
+
+	gotVerify map[string]any // body of the last Verify-Payment call
 }
 
 func (m *pasargadMock) server(t *testing.T) *httptest.Server {
@@ -49,6 +53,7 @@ func (m *pasargadMock) server(t *testing.T) *httptest.Server {
 				},
 			})
 		case strings.HasSuffix(r.URL.Path, "/Api/Payment/Verify-Payment"):
+			_ = json.NewDecoder(r.Body).Decode(&m.gotVerify)
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"ResultCode": m.verifyCode,
 				"ResultMsg":  m.verifyMsg,
@@ -73,6 +78,14 @@ var testPayment = &payjet.Payment{
 	Mobile:      "09100000000",
 	Email:       "buyer@shop.ir",
 	Description: "خرید",
+}
+
+// withToken returns testPayment carrying the UrlId Request issued for it, as a
+// caller passes it to Verify.
+func withToken(tok string) *payjet.Payment {
+	p := *testPayment
+	p.Token = tok
+	return &p
 }
 
 // ── Request ───────────────────────────────────────────────────────────────────
@@ -135,21 +148,25 @@ func TestRequest_PurchaseFailed(t *testing.T) {
 // ── Verify ────────────────────────────────────────────────────────────────────
 
 func TestVerify_Success(t *testing.T) {
-	gw := newGateway(t, &pasargadMock{
+	m := &pasargadMock{
 		tokenCode: 0, tokenValue: "tok",
 		verifyCode: 0,
-	})
+	}
+	gw := newGateway(t, m)
 
-	res, err := gw.Verify(context.Background(), testPayment, map[string]string{
+	// Pasargad's callback carries no UrlId; Verify sends the one from Request.
+	res, err := gw.Verify(context.Background(), withToken("url-id-123"), map[string]string{
 		"status":          "success",
 		"invoiceId":       testPayment.OrderID,
 		"referenceNumber": "REF-98765",
-		"urlId":           "url-id-123",
+		"trackId":         "7",
 	})
 
 	require.NoError(t, err)
 	assert.Equal(t, "REF-98765", res.RefID)
 	assert.Equal(t, testPayment.OrderID, res.OrderID)
+	assert.Equal(t, "url-id-123", m.gotVerify["UrlId"])
+	assert.Equal(t, testPayment.OrderID, m.gotVerify["Invoice"])
 }
 
 func TestVerify_StatusFailed(t *testing.T) {
@@ -166,7 +183,7 @@ func TestVerify_StatusFailed(t *testing.T) {
 func TestVerify_OrderIDMismatch(t *testing.T) {
 	gw := newGateway(t, &pasargadMock{tokenCode: 0, tokenValue: "tok"})
 
-	_, err := gw.Verify(context.Background(), testPayment, map[string]string{
+	_, err := gw.Verify(context.Background(), withToken("u"), map[string]string{
 		"status":    "success",
 		"invoiceId": "wrong-order",
 	})
@@ -180,13 +197,23 @@ func TestVerify_VerifyCallFailed(t *testing.T) {
 		verifyCode: 500, verifyMsg: "server error",
 	})
 
-	_, err := gw.Verify(context.Background(), testPayment, map[string]string{
+	_, err := gw.Verify(context.Background(), withToken("u"), map[string]string{
 		"status":    "success",
 		"invoiceId": testPayment.OrderID,
-		"urlId":     "u",
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "500")
+}
+
+func TestVerify_RequiresPaymentToken(t *testing.T) {
+	gw := newGateway(t, &pasargadMock{tokenCode: 0, tokenValue: "tok"})
+
+	_, err := gw.Verify(context.Background(), testPayment, map[string]string{
+		"status":    "success",
+		"invoiceId": testPayment.OrderID,
+	})
+	require.Error(t, err)
+	assert.True(t, errorx.IsBadRequestError(err))
 }
 
 // ── Options ───────────────────────────────────────────────────────────────────

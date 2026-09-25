@@ -149,6 +149,7 @@ func TestVerify_AlreadyVerified_Code43(t *testing.T) {
 	res, err := gw.Verify(context.Background(), testPayment, successCallbackParams)
 	require.NoError(t, err, "code 43 (already verified) must be treated as success")
 	assert.NotEmpty(t, res.RefID)
+	assert.True(t, res.AlreadyVerified)
 }
 
 func TestVerify_AlreadySettled_Code45(t *testing.T) {
@@ -157,6 +158,59 @@ func TestVerify_AlreadySettled_Code45(t *testing.T) {
 	res, err := gw.Verify(context.Background(), testPayment, successCallbackParams)
 	require.NoError(t, err, "code 45 (already settled) must be treated as success")
 	assert.NotEmpty(t, res.RefID)
+	assert.False(t, res.AlreadyVerified)
+}
+
+// Mellat's schema leaves the operation's fields unqualified; a namespaced
+// <int:terminalId> would reach the service as a missing field.
+func TestRequest_FieldsAreUnqualified(t *testing.T) {
+	var body string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		body = string(b)
+		w.Write([]byte(soapResponse("bpPayRequest", "0,ref")))
+	}))
+	t.Cleanup(srv.Close)
+	gw := mellat.New(mellat.Config{TerminalID: 12345, Username: "user", Password: "pass"},
+		mellat.WithEndpoints(srv.URL, mellat.DefaultPaymentURL))
+
+	_, err := gw.Request(context.Background(), testPayment)
+
+	require.NoError(t, err)
+	assert.Contains(t, body, "<int:bpPayRequest>")
+	assert.Contains(t, body, "<terminalId>12345</terminalId>")
+	assert.Contains(t, body, "<orderId>100001</orderId>")
+	assert.NotContains(t, body, "<int:terminalId>")
+}
+
+func TestVerify_SaleOrderIDMismatch(t *testing.T) {
+	gw := newGateway(t, &soapMock{verifyReturn: "0", settleReturn: "0"})
+	params := map[string]string{}
+	for k, v := range successCallbackParams {
+		params[k] = v
+	}
+	params["SaleOrderId"] = "999999"
+
+	_, err := gw.Verify(context.Background(), testPayment, params)
+	assert.ErrorIs(t, err, payjet.ErrOrderMismatch)
+}
+
+func TestVerify_TokenMismatch(t *testing.T) {
+	gw := newGateway(t, &soapMock{verifyReturn: "0", settleReturn: "0"})
+	p := *testPayment
+	p.Token = "a-different-ref-id"
+
+	_, err := gw.Verify(context.Background(), &p, successCallbackParams)
+	assert.ErrorIs(t, err, payjet.ErrTokenMismatch)
+}
+
+func TestVerify_MatchingToken(t *testing.T) {
+	gw := newGateway(t, &soapMock{verifyReturn: "0", settleReturn: "0"})
+	p := *testPayment
+	p.Token = successCallbackParams["RefId"]
+
+	_, err := gw.Verify(context.Background(), &p, successCallbackParams)
+	require.NoError(t, err)
 }
 
 func TestVerify_VerifyFails(t *testing.T) {

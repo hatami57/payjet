@@ -29,6 +29,16 @@ type Gateway struct {
 	gatewayURL string
 	mu         sync.RWMutex
 	pending    map[string]pendingPayment // token → payment
+	issued     map[string]issuedTx       // transaction code → paid payment
+}
+
+// issuedTx is a payment the user paid on the page (or via SimulatePayment).
+// Verify accepts only transaction codes recorded here, so a hand-made
+// result=true callback cannot pass as a payment.
+type issuedTx struct {
+	orderID  string
+	token    string
+	verified bool
 }
 
 type pendingPayment struct {
@@ -48,6 +58,7 @@ func New(gatewayURL string, opts ...Option) *Gateway {
 	g := &Gateway{
 		gatewayURL: strings.TrimRight(gatewayURL, "/"),
 		pending:    make(map[string]pendingPayment),
+		issued:     make(map[string]issuedTx),
 	}
 	for _, o := range opts {
 		o(g)
@@ -82,7 +93,7 @@ func (g *Gateway) Request(ctx context.Context, p *payjet.Payment) (*payjet.Reque
 
 // CallbackOrderID returns the OrderID echoed in the callback params.
 func (g *Gateway) CallbackOrderID(params map[string]string) string {
-	return params["OrderID"]
+	return payjet.Param(params, "OrderID")
 }
 
 // Verify checks the callback params produced by the HTML handler or
@@ -90,25 +101,70 @@ func (g *Gateway) CallbackOrderID(params map[string]string) string {
 //
 //	"result"          "true" or "false"
 //	"OrderID"         the original order ID
-//	"TransactionCode" random reference (present only when result=true)
+//	"TransactionCode" the reference the gateway issued (present only when result=true)
+//	"token"           the RequestResult.Token (checked against p.Token when set)
+//
+// Only transaction codes this gateway issued for p's order are accepted; a code
+// verified before returns AlreadyVerified.
 func (g *Gateway) Verify(_ context.Context, p *payjet.Payment, params map[string]string) (*payjet.VerifyResult, error) {
-	if params["result"] != "true" {
-		return nil, payjet.Declined("virtual", "verify", params["result"], "")
+	result := payjet.Param(params, "result")
+	if result != "true" {
+		return nil, payjet.Declined("virtual", "verify", result, "")
 	}
-	txCode := params["TransactionCode"]
-	if txCode == "" {
-		txCode = newRandHex(12)
+	if p == nil {
+		return nil, payjet.Invalid("virtual", "verify", "payment is nil")
 	}
-	var amount int64
-	if p != nil {
-		amount = p.Amount
+	if payjet.Param(params, "OrderID") != p.OrderID {
+		return nil, payjet.Mismatch("virtual", "verify", payjet.ErrOrderMismatch)
 	}
+	if p.Token != "" && payjet.Param(params, "token") != p.Token {
+		return nil, payjet.Mismatch("virtual", "verify", payjet.ErrTokenMismatch)
+	}
+	txCode := payjet.Param(params, "TransactionCode")
+
+	g.mu.Lock()
+	tx, ok := g.issued[txCode]
+	alreadyVerified := tx.verified
+	if ok && tx.orderID == p.OrderID {
+		tx.verified = true
+		g.issued[txCode] = tx
+	}
+	g.mu.Unlock()
+	if !ok || tx.orderID != p.OrderID {
+		return nil, payjet.Rejected("virtual", "verify", "", "unknown transaction code")
+	}
+
 	return &payjet.VerifyResult{
-		RefID:     txCode,
-		OrderID:   params["OrderID"],
-		Amount:    amount,
-		RawParams: params,
+		RefID:           txCode,
+		OrderID:         p.OrderID,
+		Amount:          p.Amount,
+		RawParams:       params,
+		AlreadyVerified: alreadyVerified,
 	}, nil
+}
+
+// complete finishes the pending payment for token (or, when token is empty, the
+// one for orderID) and, when paid, issues and records a transaction code for
+// it. It returns the payment's token ("" if it was never requested) and the
+// code ("" when not paid).
+func (g *Gateway) complete(token, orderID string, paid bool) (string, string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if token == "" {
+		for t, p := range g.pending {
+			if p.orderID == orderID {
+				token = t
+				break
+			}
+		}
+	}
+	delete(g.pending, token)
+	if !paid {
+		return token, ""
+	}
+	txCode := newRandHex(12)
+	g.issued[txCode] = issuedTx{orderID: orderID, token: token}
+	return token, txCode
 }
 
 // ---- test helpers -----------------------------------------------------------
@@ -122,13 +178,17 @@ func (g *Gateway) Verify(_ context.Context, p *payjet.Payment, params map[string
 //	params := gw.SimulatePayment(payment.OrderID, true)
 //	result, _ := gw.Verify(payment, params)
 func (g *Gateway) SimulatePayment(orderID string, succeed bool) map[string]string {
+	token, txCode := g.complete("", orderID, succeed)
 	params := map[string]string{
 		"OrderID": orderID,
 		"result":  "false",
 	}
+	if token != "" {
+		params["token"] = token
+	}
 	if succeed {
 		params["result"] = "true"
-		params["TransactionCode"] = newRandHex(12)
+		params["TransactionCode"] = txCode
 	}
 	return params
 }
@@ -159,16 +219,14 @@ func (g *Gateway) Handler() http.Handler {
 
 		if r.Method == http.MethodPost {
 			isPaid := r.FormValue("pay") == "1"
-
-			g.mu.Lock()
-			delete(g.pending, token)
-			g.mu.Unlock()
+			_, txCode := g.complete(token, p.orderID, isPaid)
 
 			q := url.Values{}
 			q.Set("OrderID", p.orderID)
+			q.Set("token", token)
 			if isPaid {
 				q.Set("result", "true")
-				q.Set("TransactionCode", newRandHex(12))
+				q.Set("TransactionCode", txCode)
 			} else {
 				q.Set("result", "false")
 			}

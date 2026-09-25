@@ -72,3 +72,19 @@ func TestError_UnwrapsSentinel(t *testing.T) {
 	assert.Contains(t, err.Error(), "zarinpal")
 	assert.Contains(t, err.Error(), "-1")
 }
+
+func TestParam_IgnoresCase(t *testing.T) {
+	params := map[string]string{"Token": "t1", "status": "0"}
+
+	assert.Equal(t, "t1", payjet.Param(params, "Token"))
+	assert.Equal(t, "t1", payjet.Param(params, "token"))
+	assert.Equal(t, "0", payjet.Param(params, "Status"))
+	assert.Equal(t, "", payjet.Param(params, "missing"))
+}
+
+func TestParam_PrefersExactMatch(t *testing.T) {
+	params := map[string]string{"token": "lower", "Token": "upper"}
+
+	assert.Equal(t, "upper", payjet.Param(params, "Token"))
+	assert.Equal(t, "lower", payjet.Param(params, "token"))
+}

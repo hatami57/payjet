@@ -12,8 +12,8 @@ touching your checkout or callback code. **All amounts are in Rials.**
 | `idpay`     | `idpay.New(apiKey, ...opts)`                   | REST, sandbox supported                          |
 | `mellat`    | `mellat.New(mellat.Config{...}, ...opts)`      | SOAP, auto-settles after verify, numeric OrderID |
 | `saman`     | `saman.New(terminalID, ...opts)`               | REST, POST redirect to payment page              |
-| `parsian`   | `parsian.New(loginAccount, ...opts)`           | SOAP, GET redirect                               |
-| `pasargad`  | `pasargad.New(pasargad.Config{...}, ...opts)`  | REST, merchant-specific base URL required        |
+| `parsian`   | `parsian.New(loginAccount, ...opts)`           | SOAP, GET redirect, `Payment.Token` required on Verify |
+| `pasargad`  | `pasargad.New(pasargad.Config{...}, ...opts)`  | REST, merchant-specific base URL, `Payment.Token` required on Verify |
 | `virtual`   | `virtual.New(gatewayURL, ...opts)`             | Local test gateway — no real bank                |
 
 ## Install
@@ -37,7 +37,9 @@ A payment flows in three steps:
 1. **Request** — create a payment and get a redirect target.
 2. Send the user to the gateway, they pay, the bank redirects them back to your
    `CallbackURL`.
-3. **Verify** — confirm the payment from the callback params.
+3. **Verify** — confirm the payment from the callback params. Pass the
+   payment with `Token` set to the `RequestResult.Token` from step 1, so the
+   gateway can check the callback belongs to this payment.
 
 ## Quick start
 
@@ -77,8 +79,10 @@ func main() {
             return
         }
 
-        // Persist the payment, keyed by both OrderID and the gateway token, so it
+        // Keep the gateway token with the payment: Verify checks the callback
+        // against it. Persist the payment keyed by both OrderID and token, so it
         // can be found again in the callback regardless of which the gateway echoes.
+        p.Token = res.Token
         mu.Lock()
         store[p.OrderID] = p
         store[res.Token] = p
@@ -111,6 +115,8 @@ func main() {
             return
         }
 
+        // A real app also records that the order is paid and ignores later
+        // callbacks for it; result.AlreadyVerified flags a repeat verification.
         log.Printf("paid: order=%s ref=%s card=%s", result.OrderID, result.RefID, result.CardNumber)
         http.Redirect(w, r, "/payment/success", http.StatusFound)
     })
@@ -135,8 +141,16 @@ type Payment struct {
     Description string
     Mobile      string // optional
     Email       string // optional
+    Token       string // RequestResult.Token; set it when calling Verify
 }
 ```
+
+`Token` is ignored by `Request`. On `Verify` it lets the gateway reject a
+callback that belongs to a different payment: a callback carrying another
+order's token fails with `ErrTokenMismatch`. Parsian and Pasargad require it —
+Parsian's confirmation reports no amount or order to check instead, and
+Pasargad's callback omits the `UrlId` its verify call needs. The other gateways
+check it when it is set. Always set it.
 
 Call `p.Validate()` to fail fast on missing required fields. `Request` already
 calls it for you before making any network request.
@@ -175,8 +189,14 @@ type VerifyResult struct {
     OrderID    string
     Amount     int64             // verified amount, when the gateway reports it
     RawParams  map[string]string // the callback params, for auditing
+    AlreadyVerified bool         // the gateway had verified this payment before
 }
 ```
+
+`AlreadyVerified` is set when the gateway reports a repeat verification
+(Zarinpal code 101, IDPay status 101, Mellat code 43). The payment is genuine,
+but a replayed or retried callback lands here too, so fulfil the order only if
+it is not already fulfilled.
 
 ## Errors
 
@@ -192,6 +212,8 @@ case errors.Is(err, payjet.ErrAmountMismatch):
     // verified amount differs from the requested amount
 case errors.Is(err, payjet.ErrOrderMismatch):
     // callback order ID does not match the payment
+case errors.Is(err, payjet.ErrTokenMismatch):
+    // callback token is not the one issued for the payment (Payment.Token)
 case err != nil:
     // network / gateway fault
 }
@@ -247,6 +269,10 @@ the merchant order ID back** — only its `Authority`, which equals
 store the payment under `res.Token` (as the quick start does) and the lookup
 works uniformly across all gateways.
 
+Banks are also inconsistent about the casing of callback fields (Parsian posts
+`Token` and `OrderId`), so gateways match field names case-insensitively. Use
+`payjet.Param(params, name)` to read a callback field the same way.
+
 ## Configuration options
 
 Every gateway accepts functional options:
@@ -293,6 +319,10 @@ params := gw.SimulatePayment(payment.OrderID, true) // true = pay, false = cance
 result, _ := gw.Verify(ctx, payment, params)
 ```
 
+`Verify` accepts only transaction codes the gateway issued itself, from its page
+or `SimulatePayment`, so a hand-written `result=true` callback is rejected. It is
+still a test gateway: never deploy it where real orders are fulfilled.
+
 ## Persistence
 
 payjet keeps storage behind two interfaces so you can use any backend, and ships
@@ -318,7 +348,9 @@ type TransactionStore interface {
 `Token` for token-only callbacks like Zarinpal); `Transaction` is the persisted
 outcome of a `Verify` (ref/trace number, masked card, amount, and the raw
 callback params for reconciliation). The helpers `payjet.NewStoredPayment` and
-`payjet.NewTransaction` build them from a `Payment` and a `VerifyResult`.
+`payjet.NewTransaction` build them from a `Payment` and a `VerifyResult`, and
+`StoredPayment.Payment()` rebuilds the `Payment` — token included — to pass to
+`Verify` in the callback.
 
 ### Default stores via the module
 

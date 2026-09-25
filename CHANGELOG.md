@@ -4,6 +4,94 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Reviewed every gateway against [Parbad](https://github.com/Sina-Soltani/Parbad).
+Several verified callbacks that did not belong to the payment, and some could
+not verify a real payment at all. Upgrading needs one change: set
+`Payment.Token` when calling `Verify` (see **Added**); Parsian and Pasargad
+now require it.
+
+### Security
+
+- **Parsian: a paid token could confirm a different order.** Verify confirmed
+  whatever token the callback carried and only checked `OrderId`, and
+  `ConfirmPayment` reports no amount. A customer could pay a cheap order,
+  withhold its callback, and send one for an expensive order carrying the cheap
+  order's token; the expensive order verified. Verify now requires
+  `Payment.Token` and rejects a different callback token with
+  `ErrTokenMismatch`. It also checks the callback amount when present.
+- **IDPay: verify trusted the callback's `order_id`.** It sent the callback's
+  `order_id` to the verify API instead of the payment's, never compared the two,
+  and ignored the verified amount. It now rejects a mismatched `order_id`
+  (`ErrOrderMismatch`), callback amount or verified amount (`ErrAmountMismatch`),
+  or `id` (`ErrTokenMismatch`, when `Payment.Token` is set), and verifies with
+  the payment's own order ID.
+- **Mellat: the callback's `SaleOrderId` was sent back to the bank unchecked.** It
+  must now equal the payment's order ID, and the payment's ID is what is sent.
+  The callback `RefId` is checked against `Payment.Token` when set.
+- **Zarinpal: the callback `Authority` is checked against `Payment.Token`** when
+  set.
+- **Virtual gateway: any `result=true` callback verified.** Verify now accepts
+  only transaction codes the gateway issued from its page or `SimulatePayment`,
+  for the matching order and token.
+- **Webshop example:** the result page interpolated `ref` and `msg` from the URL
+  into HTML unescaped (reflected XSS); both are escaped now. The callback
+  handler verified orders in any state, so a replayed callback re-fulfilled a
+  paid order and a forged decline flipped it to failed; only pending orders are
+  verified now.
+
+### Fixed
+
+- **Pasargad verify sent an empty `UrlId`.** It read `urlId` from the callback,
+  which carries only `invoiceId`, `status`, `referenceNumber` and `trackId`.
+  Verify now sends `Payment.Token` (the purchase `UrlId`) and requires it.
+- **Mellat SOAP fields were namespace-qualified.** `<int:terminalId>` and the
+  other fields are now unqualified (`<terminalId>`), as Mellat's JAX-WS schema
+  and Parbad expect; only the operation element keeps its namespace.
+- **Callback fields are matched case-insensitively** in every gateway, through
+  the new `payjet.Param`. Parsian posts `Token`, `OrderId` and `Amount`, which
+  the exact `token`/`orderId` lookups missed, so every Parsian verify failed and
+  its callback order lookup returned nothing.
+- **Zarinpal error responses could not be decoded.** Failures arrive as
+  `{"data": [], "errors": {...}}` (or an `errors` array), which did not fit the
+  response struct, so every rejection became a generic decode fault and the
+  bank's code was lost. They are now `Rejected` errors carrying the code in
+  `gatewayCode`, and -51 (payment failed) is `Declined` (`ErrCancelled`). The
+  callback `Status` is matched case-insensitively, as in Parbad.
+- **IDPay responses with string-typed numbers failed to decode.** IDPay documents
+  `status`, `track_id` and `amount` as strings; the verify response now accepts
+  strings or numbers. A failed verify reports IDPay's `error_code` instead of
+  `0`.
+- **Saman verify checks the verified transaction's terminal and `RefNum`,** as
+  Parbad does, and reports `OrderID` from the payment rather than the callback.
+- **`GetPaymentByToken("")` matched any payment saved without a token** in the
+  default store, such as one whose Request failed. It now returns nil.
+- **Webshop example:** a network fault during verify marked the order failed
+  although the bank may have taken the money; the order now stays pending. Order
+  IDs are numeric, since Mellat and Parsian reject `order-<ms>`. A failed
+  Request marks the order failed, and a failure saving the token is reported
+  instead of ignored.
+
+### Added
+
+- `Payment.Token` — the `RequestResult.Token` issued for the payment. Set it
+  when calling `Verify`; Parsian and Pasargad require it and the other gateways
+  check the callback against it when set.
+- `VerifyResult.AlreadyVerified` — set for a repeat verification (Zarinpal 101,
+  IDPay 101, Mellat 43, a virtual code verified before), so a replayed callback
+  can be told apart from a first one.
+- `ErrTokenMismatch` — the callback's token is not the payment's.
+- `payjet.Param(params, name)` — reads a callback field, matching the name
+  case-insensitively when there is no exact match.
+- `StoredPayment.Payment()` — rebuilds the `Payment`, token included, to pass to
+  `Verify`.
+
+### Changed
+
+- The virtual gateway's callback carries `token`, and `SimulatePayment` includes
+  the token of the payment it completes.
+
 ## [0.8.1] - 2026-09-25
 
 ### Fixed

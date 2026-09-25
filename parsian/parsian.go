@@ -6,6 +6,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/majid/payjet"
@@ -102,9 +103,9 @@ func xmlNodeValue(data, localName, ns string) string {
 
 // ---- request / verify -------------------------------------------------------
 
-// CallbackOrderID returns the orderId Parsian echoes back in the callback.
+// CallbackOrderID returns the OrderId Parsian echoes back in the callback.
 func (g *Gateway) CallbackOrderID(params map[string]string) string {
-	return params["orderId"]
+	return payjet.Param(params, "OrderId")
 }
 
 func (g *Gateway) Request(ctx context.Context, p *payjet.Payment) (*payjet.RequestResult, error) {
@@ -148,15 +149,33 @@ func (g *Gateway) Request(ctx context.Context, p *payjet.Payment) (*payjet.Reque
 	}, nil
 }
 
+// Verify confirms the payment. p.Token must be the RequestResult.Token issued
+// for p: ConfirmPayment settles whichever token it is given and reports no
+// amount or order, so without this check a callback carrying the token of a
+// cheaper paid order would confirm that payment against p.
 func (g *Gateway) Verify(ctx context.Context, p *payjet.Payment, params map[string]string) (*payjet.VerifyResult, error) {
-	if params["status"] != "0" {
-		return nil, payjet.Declined("parsian", "verify", params["status"], "")
+	status := payjet.Param(params, "status")
+	if status != "0" {
+		return nil, payjet.Declined("parsian", "verify", status, "")
 	}
-	if params["token"] == "" {
+	if p.Token == "" {
+		return nil, payjet.Invalid("parsian", "verify", "Payment.Token is required to verify a Parsian payment")
+	}
+	token := payjet.Param(params, "Token")
+	if token == "" {
 		return nil, payjet.Fault("parsian", "verify", "no token in callback", nil)
 	}
-	if params["orderId"] != p.OrderID {
+	if token != p.Token {
+		return nil, payjet.Mismatch("parsian", "verify", payjet.ErrTokenMismatch)
+	}
+	if payjet.Param(params, "OrderId") != p.OrderID {
 		return nil, payjet.Mismatch("parsian", "verify", payjet.ErrOrderMismatch)
+	}
+	if amount := payjet.Param(params, "Amount"); amount != "" {
+		n, err := strconv.ParseInt(strings.ReplaceAll(amount, ",", ""), 10, 64)
+		if err != nil || n != p.Amount {
+			return nil, payjet.Mismatch("parsian", "verify", payjet.ErrAmountMismatch)
+		}
 	}
 	envelope := fmt.Sprintf(
 		`<?xml version="1.0" encoding="UTF-8"?>`+
@@ -167,18 +186,18 @@ func (g *Gateway) Verify(ctx context.Context, p *payjet.Payment, params map[stri
 			`<con:Token>%s</con:Token>`+
 			`</con:requestData></con:ConfirmPayment>`+
 			`</soapenv:Body></soapenv:Envelope>`,
-		verifyNS, xmlEscape(g.loginAccount), xmlEscape(params["token"]),
+		verifyNS, xmlEscape(g.loginAccount), xmlEscape(token),
 	)
 	data, err := soap.Post(ctx, g.client, g.verifyURL, `"ConfirmPayment"`, envelope)
 	if err != nil {
 		return nil, payjet.Fault("parsian", "verify", "ConfirmPayment call failed", err)
 	}
 	raw := string(data)
-	status := xmlNodeValue(raw, "Status", verifyNS)
+	confirmStatus := xmlNodeValue(raw, "Status", verifyNS)
 	rrn := xmlNodeValue(raw, "RRN", verifyNS)
 
-	if status != "0" || rrn == "" {
-		return nil, payjet.Rejected("parsian", "verify", status, "")
+	if confirmStatus != "0" || rrn == "" {
+		return nil, payjet.Rejected("parsian", "verify", confirmStatus, "")
 	}
 	return &payjet.VerifyResult{
 		RefID:     rrn,

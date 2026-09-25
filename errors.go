@@ -20,6 +20,10 @@ var (
 	ErrAmountMismatch = errors.New("verified amount does not match requested amount")
 	// ErrOrderMismatch means the order ID in the callback does not match the payment.
 	ErrOrderMismatch = errors.New("callback order ID does not match payment")
+	// ErrTokenMismatch means the gateway token in the callback is not the one
+	// issued for the payment (Payment.Token), so the callback belongs to a
+	// different payment.
+	ErrTokenMismatch = errors.New("callback token does not match payment")
 )
 
 // gatewayError builds the structured *errorx.Error shared by all the helpers
@@ -59,7 +63,7 @@ func Rejected(gateway, op, code, message string) *errorx.Error {
 	return gatewayError(errorx.BusinessErrorType, gateway, op, code, message, nil)
 }
 
-// Mismatch wraps ErrOrderMismatch or ErrAmountMismatch as a Business error so
+// Mismatch wraps ErrOrderMismatch, ErrTokenMismatch or ErrAmountMismatch as a Business error so
 // the caller can both branch with errors.Is and get an HTTP 409.
 func Mismatch(gateway, op string, sentinel error) *errorx.Error {
 	return gatewayError(errorx.BusinessErrorType, gateway, op, "", sentinel.Error(), sentinel)

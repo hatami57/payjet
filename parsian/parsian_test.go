@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hatami57/microjet/core/errorx"
+
 	"github.com/majid/payjet"
 	"github.com/majid/payjet/parsian"
 	"github.com/stretchr/testify/assert"
@@ -90,6 +92,14 @@ var testPayment = &payjet.Payment{
 	Description: "پرداخت",
 }
 
+// withToken returns testPayment carrying the token Request issued for it, as a
+// caller passes it to Verify.
+func withToken(tok string) *payjet.Payment {
+	p := *testPayment
+	p.Token = tok
+	return &p
+}
+
 // ── Request ───────────────────────────────────────────────────────────────────
 
 func TestRequest_Success(t *testing.T) {
@@ -144,7 +154,7 @@ func TestVerify_Success(t *testing.T) {
 		confirmStatus: "0", confirmRRN: "123456789012",
 	})
 
-	res, err := gw.Verify(context.Background(), testPayment, map[string]string{
+	res, err := gw.Verify(context.Background(), withToken("parsian-token"), map[string]string{
 		"status":  "0",
 		"token":   "parsian-token",
 		"orderId": testPayment.OrderID,
@@ -158,7 +168,7 @@ func TestVerify_Success(t *testing.T) {
 func TestVerify_CallbackStatusFailed(t *testing.T) {
 	gw := newGateway(t, &parsianMock{})
 
-	_, err := gw.Verify(context.Background(), testPayment, map[string]string{
+	_, err := gw.Verify(context.Background(), withToken("any"), map[string]string{
 		"status":  "-1",
 		"token":   "any",
 		"orderId": testPayment.OrderID,
@@ -169,7 +179,7 @@ func TestVerify_CallbackStatusFailed(t *testing.T) {
 func TestVerify_OrderIDMismatch(t *testing.T) {
 	gw := newGateway(t, &parsianMock{})
 
-	_, err := gw.Verify(context.Background(), testPayment, map[string]string{
+	_, err := gw.Verify(context.Background(), withToken("tok"), map[string]string{
 		"status":  "0",
 		"token":   "tok",
 		"orderId": "wrong-order",
@@ -181,7 +191,7 @@ func TestVerify_OrderIDMismatch(t *testing.T) {
 func TestVerify_MissingToken(t *testing.T) {
 	gw := newGateway(t, &parsianMock{})
 
-	_, err := gw.Verify(context.Background(), testPayment, map[string]string{
+	_, err := gw.Verify(context.Background(), withToken("tok"), map[string]string{
 		"status":  "0",
 		"orderId": testPayment.OrderID,
 	})
@@ -194,10 +204,61 @@ func TestVerify_ConfirmFails(t *testing.T) {
 		confirmStatus: "-6", confirmRRN: "",
 	})
 
-	_, err := gw.Verify(context.Background(), testPayment, map[string]string{
+	_, err := gw.Verify(context.Background(), withToken("tok"), map[string]string{
 		"status":  "0",
 		"token":   "tok",
 		"orderId": testPayment.OrderID,
 	})
 	require.Error(t, err)
+}
+
+func TestVerify_RequiresPaymentToken(t *testing.T) {
+	gw := newGateway(t, &parsianMock{confirmStatus: "0", confirmRRN: "1"})
+
+	_, err := gw.Verify(context.Background(), testPayment, map[string]string{
+		"status": "0", "token": "tok", "orderId": testPayment.OrderID,
+	})
+	require.Error(t, err)
+	assert.True(t, errorx.IsBadRequestError(err))
+}
+
+// A callback carrying another payment's token must not confirm that payment
+// against this order: ConfirmPayment reports no amount to catch it later.
+func TestVerify_TokenOfAnotherPaymentRejected(t *testing.T) {
+	confirmed := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		confirmed = true
+		w.Write([]byte(confirmResponse("0", "123", "cheap-order-token")))
+	}))
+	t.Cleanup(srv.Close)
+	gw := parsian.New("acc", parsian.WithEndpoints(srv.URL, srv.URL, ""))
+
+	_, err := gw.Verify(context.Background(), withToken("expensive-order-token"), map[string]string{
+		"status": "0", "token": "cheap-order-token", "orderId": testPayment.OrderID,
+	})
+	assert.ErrorIs(t, err, payjet.ErrTokenMismatch)
+	assert.False(t, confirmed, "ConfirmPayment must not be called")
+}
+
+func TestVerify_AmountMismatch(t *testing.T) {
+	gw := newGateway(t, &parsianMock{confirmStatus: "0", confirmRRN: "1"})
+
+	_, err := gw.Verify(context.Background(), withToken("tok"), map[string]string{
+		"status": "0", "token": "tok", "orderId": testPayment.OrderID, "amount": "1000",
+	})
+	assert.ErrorIs(t, err, payjet.ErrAmountMismatch)
+}
+
+// Parsian posts Token/OrderId/Amount capitalized; lookups ignore case.
+func TestVerify_CapitalizedCallbackFields(t *testing.T) {
+	gw := newGateway(t, &parsianMock{confirmStatus: "0", confirmRRN: "998877"})
+	params := map[string]string{
+		"status": "0", "Token": "tok", "OrderId": testPayment.OrderID,
+		"Amount": fmt.Sprintf("%d", testPayment.Amount),
+	}
+
+	assert.Equal(t, testPayment.OrderID, gw.CallbackOrderID(params))
+	res, err := gw.Verify(context.Background(), withToken("tok"), params)
+	require.NoError(t, err)
+	assert.Equal(t, "998877", res.RefID)
 }

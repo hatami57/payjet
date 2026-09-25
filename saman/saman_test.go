@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 
 	"github.com/hatami57/microjet/core/errorx"
@@ -25,6 +26,8 @@ type samanMock struct {
 	verifyRRN    string
 	verifyPan    string
 	verifyAmount int64
+	// verifyRefNum overrides the RefNum the verify response echoes back.
+	verifyRefNum string
 }
 
 func (m *samanMock) server(t *testing.T) *httptest.Server {
@@ -40,12 +43,22 @@ func (m *samanMock) server(t *testing.T) *httptest.Server {
 				"errorDesc": m.tokenErrMsg,
 			})
 		case "/verify":
+			// Saman echoes the verified transaction's RefNum and terminal.
+			var req struct{ RefNum, TerminalNumber string }
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			refNum := req.RefNum
+			if m.verifyRefNum != "" {
+				refNum = m.verifyRefNum
+			}
+			terminal, _ := strconv.ParseInt(req.TerminalNumber, 10, 64)
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"ResultCode":        m.verifyCode,
 				"ResultDescription": m.verifyDesc,
 				"TransactionDetail": map[string]interface{}{
 					"Rrn":             m.verifyRRN,
+					"RefNum":          refNum,
 					"MaskedPan":       m.verifyPan,
+					"TerminalNumber":  terminal,
 					"AffectiveAmount": m.verifyAmount,
 				},
 			})
@@ -200,4 +213,25 @@ func TestVerify_TransportFailureIsGatewayFault(t *testing.T) {
 	require.NotNil(t, ce)
 	assert.Equal(t, "saman", ce.Subject)
 	assert.Equal(t, "verify", ce.Params["op"])
+}
+
+func TestVerify_RefNumMismatch(t *testing.T) {
+	gw := newGateway(t, &samanMock{verifyCode: 0, verifyRRN: "1", verifyAmount: testPayment.Amount, verifyRefNum: "someone-elses-ref"})
+
+	_, err := gw.Verify(context.Background(), testPayment, map[string]string{
+		"Status": "2", "ResNum": testPayment.OrderID, "RefNum": "ref-1",
+	})
+
+	require.Error(t, err)
+	assert.True(t, errorx.IsInternalError(err))
+}
+
+func TestVerify_CaseInsensitiveCallback(t *testing.T) {
+	gw := newGateway(t, &samanMock{verifyCode: 0, verifyRRN: "rrn-9", verifyAmount: testPayment.Amount})
+	params := map[string]string{"status": "2", "resnum": testPayment.OrderID, "refnum": "ref-1"}
+
+	assert.Equal(t, testPayment.OrderID, gw.CallbackOrderID(params))
+	res, err := gw.Verify(context.Background(), testPayment, params)
+	require.NoError(t, err)
+	assert.Equal(t, "rrn-9", res.RefID)
 }

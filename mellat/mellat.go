@@ -98,6 +98,9 @@ func xmlEscape(s string) string {
 	return buf.String()
 }
 
+// call posts a document/literal SOAP request. Only the operation element is
+// namespace-qualified; its fields (terminalId, userName, ...) are unqualified,
+// as Mellat's JAX-WS schema (elementFormDefault unqualified) expects.
 func (g *Gateway) call(ctx context.Context, action, innerXML string) (string, error) {
 	envelope := fmt.Sprintf(
 		`<?xml version="1.0" encoding="UTF-8"?>`+
@@ -120,7 +123,7 @@ func (g *Gateway) call(ctx context.Context, action, innerXML string) (string, er
 
 // CallbackOrderID returns the SaleOrderId (the merchant order ID) Mellat echoes back.
 func (g *Gateway) CallbackOrderID(params map[string]string) string {
-	return params["SaleOrderId"]
+	return payjet.Param(params, "SaleOrderId")
 }
 
 func (g *Gateway) Request(ctx context.Context, p *payjet.Payment) (*payjet.RequestResult, error) {
@@ -135,16 +138,16 @@ func (g *Gateway) Request(ctx context.Context, p *payjet.Payment) (*payjet.Reque
 	now := time.Now()
 	body := fmt.Sprintf(
 		`<int:bpPayRequest>`+
-			`<int:terminalId>%d</int:terminalId>`+
-			`<int:userName>%s</int:userName>`+
-			`<int:userPassword>%s</int:userPassword>`+
-			`<int:orderId>%d</int:orderId>`+
-			`<int:amount>%d</int:amount>`+
-			`<int:localDate>%s</int:localDate>`+
-			`<int:localTime>%s</int:localTime>`+
-			`<int:additionalData>%s</int:additionalData>`+
-			`<int:callBackUrl>%s</int:callBackUrl>`+
-			`<int:payerId>0</int:payerId>`+
+			`<terminalId>%d</terminalId>`+
+			`<userName>%s</userName>`+
+			`<userPassword>%s</userPassword>`+
+			`<orderId>%d</orderId>`+
+			`<amount>%d</amount>`+
+			`<localDate>%s</localDate>`+
+			`<localTime>%s</localTime>`+
+			`<additionalData>%s</additionalData>`+
+			`<callBackUrl>%s</callBackUrl>`+
+			`<payerId>0</payerId>`+
 			`</int:bpPayRequest>`,
 		g.terminalID, xmlEscape(g.username), xmlEscape(g.password),
 		orderID, p.Amount,
@@ -172,69 +175,91 @@ func (g *Gateway) Request(ctx context.Context, p *payjet.Payment) (*payjet.Reque
 	}, nil
 }
 
+// Verify verifies and settles the payment. When p.Token is set it must match the
+// callback's RefId.
 func (g *Gateway) Verify(ctx context.Context, p *payjet.Payment, params map[string]string) (*payjet.VerifyResult, error) {
-	if params["ResCode"] != "0" {
-		return nil, payjet.Declined("mellat", "verify", params["ResCode"], "")
+	resCode := payjet.Param(params, "ResCode")
+	if resCode != "0" {
+		return nil, payjet.Declined("mellat", "verify", resCode, "")
 	}
-	if params["RefId"] == "" || params["SaleOrderId"] == "" {
+	refID := payjet.Param(params, "RefId")
+	saleOrder := payjet.Param(params, "SaleOrderId")
+	saleRef := payjet.Param(params, "SaleReferenceId")
+	if refID == "" || saleOrder == "" {
 		return nil, payjet.Fault("mellat", "verify", "incomplete callback params", nil)
 	}
-	orderID, _ := strconv.ParseInt(p.OrderID, 10, 64)
-	saleOrderID, err := strconv.ParseInt(params["SaleOrderId"], 10, 64)
-	if err != nil {
-		return nil, payjet.Fault("mellat", "verify", "invalid SaleOrderId", err)
+	if p.Token != "" && refID != p.Token {
+		return nil, payjet.Mismatch("mellat", "verify", payjet.ErrTokenMismatch)
 	}
-	saleRefID, err := strconv.ParseInt(params["SaleReferenceId"], 10, 64)
+	if saleOrder != p.OrderID {
+		return nil, payjet.Mismatch("mellat", "verify", payjet.ErrOrderMismatch)
+	}
+	orderID, err := strconv.ParseInt(p.OrderID, 10, 64)
+	if err != nil {
+		return nil, payjet.Invalid("mellat", "verify",
+			fmt.Sprintf("OrderID must be numeric, got %q", p.OrderID))
+	}
+	saleRefID, err := strconv.ParseInt(saleRef, 10, 64)
 	if err != nil {
 		return nil, payjet.Fault("mellat", "verify", "invalid SaleReferenceId", err)
 	}
-	if err := g.verify(ctx, orderID, saleOrderID, saleRefID); err != nil {
+	// The sale order is the payment's own order ID (checked above), as in the
+	// request; the callback's copy is never sent back to the bank.
+	alreadyVerified, err := g.verify(ctx, orderID, orderID, saleRefID)
+	if err != nil {
 		return nil, err
 	}
-	if err := g.settle(ctx, orderID, saleOrderID, saleRefID); err != nil {
+	if err := g.settle(ctx, orderID, orderID, saleRefID); err != nil {
 		return nil, err
 	}
 	return &payjet.VerifyResult{
-		RefID:      params["SaleReferenceId"],
-		CardNumber: params["CardHolderPan"],
-		OrderID:    p.OrderID,
-		Amount:     p.Amount,
-		RawParams:  params,
+		RefID:           saleRef,
+		CardNumber:      payjet.Param(params, "CardHolderPan"),
+		OrderID:         p.OrderID,
+		Amount:          p.Amount,
+		RawParams:       params,
+		AlreadyVerified: alreadyVerified,
 	}, nil
 }
 
-func (g *Gateway) verify(ctx context.Context, orderID, saleOrderID, saleRefID int64) error {
+// verify calls bpVerifyRequest and reports whether Mellat had already verified
+// the sale (code 43).
+func (g *Gateway) verify(ctx context.Context, orderID, saleOrderID, saleRefID int64) (bool, error) {
 	body := fmt.Sprintf(
 		`<int:bpVerifyRequest>`+
-			`<int:terminalId>%d</int:terminalId>`+
-			`<int:userName>%s</int:userName>`+
-			`<int:userPassword>%s</int:userPassword>`+
-			`<int:orderId>%d</int:orderId>`+
-			`<int:saleOrderId>%d</int:saleOrderId>`+
-			`<int:saleReferenceId>%d</int:saleReferenceId>`+
+			`<terminalId>%d</terminalId>`+
+			`<userName>%s</userName>`+
+			`<userPassword>%s</userPassword>`+
+			`<orderId>%d</orderId>`+
+			`<saleOrderId>%d</saleOrderId>`+
+			`<saleReferenceId>%d</saleReferenceId>`+
 			`</int:bpVerifyRequest>`,
 		g.terminalID, xmlEscape(g.username), xmlEscape(g.password),
 		orderID, saleOrderID, saleRefID,
 	)
 	code, err := g.call(ctx, "bpVerifyRequest", body)
 	if err != nil {
-		return payjet.Fault("mellat", "verify", "bpVerifyRequest call failed", err)
+		return false, payjet.Fault("mellat", "verify", "bpVerifyRequest call failed", err)
 	}
-	if code != "0" && code != "43" { // 43 = already verified
-		return payjet.Rejected("mellat", "verify", code, "")
+	switch code {
+	case "0":
+		return false, nil
+	case "43": // already verified; settle anyway in case the last attempt stopped short of it
+		return true, nil
+	default:
+		return false, payjet.Rejected("mellat", "verify", code, "")
 	}
-	return nil
 }
 
 func (g *Gateway) settle(ctx context.Context, orderID, saleOrderID, saleRefID int64) error {
 	body := fmt.Sprintf(
 		`<int:bpSettleRequest>`+
-			`<int:terminalId>%d</int:terminalId>`+
-			`<int:userName>%s</int:userName>`+
-			`<int:userPassword>%s</int:userPassword>`+
-			`<int:orderId>%d</int:orderId>`+
-			`<int:saleOrderId>%d</int:saleOrderId>`+
-			`<int:saleReferenceId>%d</int:saleReferenceId>`+
+			`<terminalId>%d</terminalId>`+
+			`<userName>%s</userName>`+
+			`<userPassword>%s</userPassword>`+
+			`<orderId>%d</orderId>`+
+			`<saleOrderId>%d</saleOrderId>`+
+			`<saleReferenceId>%d</saleReferenceId>`+
 			`</int:bpSettleRequest>`,
 		g.terminalID, xmlEscape(g.username), xmlEscape(g.password),
 		orderID, saleOrderID, saleRefID,

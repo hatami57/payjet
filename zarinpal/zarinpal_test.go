@@ -151,6 +151,7 @@ func TestVerify_AlreadyVerified_Code101(t *testing.T) {
 
 	require.NoError(t, err, "code 101 (already verified) must be treated as success")
 	assert.Equal(t, "9999", res.RefID)
+	assert.True(t, res.AlreadyVerified)
 }
 
 func TestVerify_UserCancelled(t *testing.T) {
@@ -229,4 +230,78 @@ func TestRequest_MalformedResponseIsGatewayFault(t *testing.T) {
 	assert.Equal(t, "zarinpal", ce.Subject)
 	assert.Equal(t, "request", ce.Params["op"])
 	assert.NotNil(t, ce.Inner)
+}
+
+// errorServer answers every call the way Zarinpal reports a failure: an HTTP
+// error status, "data" as an empty array, and the code under "errors".
+func errorServer(t *testing.T, status int, errors string) *zarinpal.Gateway {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		w.Write([]byte(`{"data":[],"errors":` + errors + `}`))
+	}))
+	t.Cleanup(srv.Close)
+	return zarinpal.New("test-merchant-id", zarinpal.WithEndpoints(srv.URL, srv.URL, srv.URL))
+}
+
+func TestRequest_ErrorEnvelopeIsRejection(t *testing.T) {
+	gw := errorServer(t, http.StatusBadRequest,
+		`{"code":-9,"message":"The input params invalid, validation error.","validations":[]}`)
+
+	_, err := gw.Request(context.Background(), testPayment)
+
+	require.Error(t, err)
+	assert.True(t, errorx.IsBusinessError(err))
+	ce := errorx.GetError(err)
+	require.NotNil(t, ce)
+	assert.Equal(t, "-9", ce.Params["gatewayCode"])
+}
+
+func TestRequest_ErrorEnvelopeAsArray(t *testing.T) {
+	gw := errorServer(t, http.StatusBadRequest, `[{"code":-11,"message":"Merchant is not active"}]`)
+
+	_, err := gw.Request(context.Background(), testPayment)
+
+	ce := errorx.GetError(err)
+	require.NotNil(t, ce)
+	assert.Equal(t, "-11", ce.Params["gatewayCode"])
+}
+
+func TestVerify_PaymentFailedIsDecline(t *testing.T) {
+	gw := errorServer(t, http.StatusUnprocessableEntity, `{"code":-51,"message":"Session is not valid, session is not active paid try."}`)
+
+	_, err := gw.Verify(context.Background(), testPayment, map[string]string{"Status": "OK", "Authority": "A1"})
+
+	assert.ErrorIs(t, err, payjet.ErrCancelled)
+}
+
+func TestVerify_AmountMismatchIsRejection(t *testing.T) {
+	gw := errorServer(t, http.StatusUnprocessableEntity, `{"code":-50,"message":"Session is not valid, amounts values is not the same."}`)
+
+	_, err := gw.Verify(context.Background(), testPayment, map[string]string{"Status": "OK", "Authority": "A1"})
+
+	require.Error(t, err)
+	assert.True(t, errorx.IsBusinessError(err))
+	assert.NotErrorIs(t, err, payjet.ErrCancelled)
+}
+
+func TestVerify_TokenMismatch(t *testing.T) {
+	gw := newGateway(t, &zarinpalMock{verifyCode: 100, verifyRefID: 1})
+	p := *testPayment
+	p.Token = "A-issued-for-this-payment"
+
+	_, err := gw.Verify(context.Background(), &p, map[string]string{"Status": "OK", "Authority": "A-other"})
+
+	assert.ErrorIs(t, err, payjet.ErrTokenMismatch)
+}
+
+func TestVerify_CaseInsensitiveCallback(t *testing.T) {
+	gw := newGateway(t, &zarinpalMock{verifyCode: 100, verifyRefID: 42})
+	params := map[string]string{"status": "ok", "authority": "A1"}
+
+	assert.Equal(t, "A1", gw.CallbackOrderID(params))
+	res, err := gw.Verify(context.Background(), testPayment, params)
+	require.NoError(t, err)
+	assert.Equal(t, "42", res.RefID)
 }

@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hatami57/microjet/core/errorx"
+
 	"github.com/majid/payjet"
 	"github.com/majid/payjet/virtual"
 	"github.com/stretchr/testify/assert"
@@ -86,15 +88,56 @@ func TestVerify_Cancelled(t *testing.T) {
 	assert.Contains(t, err.Error(), "cancelled")
 }
 
-func TestVerify_ManualParams(t *testing.T) {
+// A hand-made result=true callback is not a payment: only codes the gateway
+// issued from its page or SimulatePayment verify.
+func TestVerify_ForgedParamsRejected(t *testing.T) {
 	gw := virtual.New("http://localhost:8080/pay")
-	res, err := gw.Verify(context.Background(), testPayment, map[string]string{
+	_, err := gw.Verify(context.Background(), testPayment, map[string]string{
 		"result":          "true",
 		"OrderID":         testPayment.OrderID,
 		"TransactionCode": "manual-tx-001",
 	})
+	require.Error(t, err)
+	assert.True(t, errorx.IsBusinessError(err))
+}
+
+func TestVerify_CodeForAnotherOrderRejected(t *testing.T) {
+	gw := virtual.New("http://localhost:8080/pay")
+	params := gw.SimulatePayment("some-other-order", true)
+	params["OrderID"] = testPayment.OrderID
+
+	_, err := gw.Verify(context.Background(), testPayment, params)
+	require.Error(t, err)
+}
+
+func TestVerify_ReplayIsAlreadyVerified(t *testing.T) {
+	gw := virtual.New("http://localhost:8080/pay")
+	params := gw.SimulatePayment(testPayment.OrderID, true)
+
+	first, err := gw.Verify(context.Background(), testPayment, params)
 	require.NoError(t, err)
-	assert.Equal(t, "manual-tx-001", res.RefID)
+	assert.False(t, first.AlreadyVerified)
+
+	again, err := gw.Verify(context.Background(), testPayment, params)
+	require.NoError(t, err)
+	assert.True(t, again.AlreadyVerified)
+}
+
+func TestVerify_TokenChecked(t *testing.T) {
+	gw := virtual.New("http://localhost:8080/pay")
+	req, err := gw.Request(context.Background(), testPayment)
+	require.NoError(t, err)
+	params := gw.SimulatePayment(testPayment.OrderID, true)
+	assert.Equal(t, req.Token, params["token"])
+
+	p := *testPayment
+	p.Token = req.Token
+	_, err = gw.Verify(context.Background(), &p, params)
+	require.NoError(t, err)
+
+	p.Token = "not-this-payments-token"
+	_, err = gw.Verify(context.Background(), &p, params)
+	assert.ErrorIs(t, err, payjet.ErrTokenMismatch)
 }
 
 // ── Automated round-trip (no browser) ─────────────────────────────────────────
@@ -168,6 +211,17 @@ func TestHandler_POST_Pay_RedirectsWithSuccess(t *testing.T) {
 	assert.NotEmpty(t, loc.Query().Get("TransactionCode"))
 	assert.Equal(t, testPayment.OrderID, loc.Query().Get("OrderID"))
 	assert.True(t, strings.HasPrefix(loc.String(), testPayment.CallbackURL))
+
+	// The callback the page redirects to verifies against the stored payment.
+	params := map[string]string{}
+	for k := range loc.Query() {
+		params[k] = loc.Query().Get(k)
+	}
+	p := *testPayment
+	p.Token = req.Token
+	res, err := gw.Verify(context.Background(), &p, params)
+	require.NoError(t, err)
+	assert.Equal(t, loc.Query().Get("TransactionCode"), res.RefID)
 }
 
 func TestHandler_POST_Cancel_RedirectsWithFailure(t *testing.T) {

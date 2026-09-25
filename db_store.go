@@ -52,6 +52,11 @@ func (d *dbPaymentStore) GetPayment(ctx context.Context, orderID string) (*Store
 }
 
 func (d *dbPaymentStore) GetPaymentByToken(ctx context.Context, token string) (*StoredPayment, error) {
+	// Payments saved before their Request returned carry an empty token; an
+	// empty lookup key must not match one of them.
+	if token == "" {
+		return nil, nil
+	}
 	return d.table.First(ctx, "token = ?", token)
 }
 

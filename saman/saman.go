@@ -101,7 +101,7 @@ type tokenResponse struct {
 
 // CallbackOrderID returns the ResNum (the merchant order ID) Saman echoes back.
 func (g *Gateway) CallbackOrderID(params map[string]string) string {
-	return params["ResNum"]
+	return payjet.Param(params, "ResNum")
 }
 
 func (g *Gateway) Request(ctx context.Context, p *payjet.Payment) (*payjet.RequestResult, error) {
@@ -142,22 +142,29 @@ type verifyResponse struct {
 	ResultDescription string `json:"ResultDescription"`
 	TransactionDetail struct {
 		Rrn             string `json:"Rrn"`
+		RefNum          string `json:"RefNum"`
 		MaskedPan       string `json:"MaskedPan"`
+		TerminalNumber  int64  `json:"TerminalNumber"`
 		AffectiveAmount int64  `json:"AffectiveAmount"`
 	} `json:"TransactionDetail"`
 }
 
 func (g *Gateway) Verify(ctx context.Context, p *payjet.Payment, params map[string]string) (*payjet.VerifyResult, error) {
 	// Status "2" = successful payment
-	if params["Status"] != "2" {
-		return nil, payjet.Declined("saman", "verify", params["Status"], "")
+	status := payjet.Param(params, "Status")
+	if status != "2" {
+		return nil, payjet.Declined("saman", "verify", status, "")
 	}
-	if params["ResNum"] != p.OrderID {
+	if payjet.Param(params, "ResNum") != p.OrderID {
 		return nil, payjet.Mismatch("saman", "verify", payjet.ErrOrderMismatch)
+	}
+	refNum := payjet.Param(params, "RefNum")
+	if refNum == "" {
+		return nil, payjet.Fault("saman", "verify", "no RefNum in callback", nil)
 	}
 	var result verifyResponse
 	if err := g.postJSON(ctx, g.verifyURL, verifyRequest{
-		RefNum:         params["RefNum"],
+		RefNum:         refNum,
 		TerminalNumber: g.terminalID,
 	}, &result); err != nil {
 		return nil, payjet.Fault("saman", "verify", "gateway call failed", err)
@@ -166,13 +173,18 @@ func (g *Gateway) Verify(ctx context.Context, p *payjet.Payment, params map[stri
 		return nil, payjet.Rejected("saman", "verify",
 			strconv.Itoa(result.ResultCode), result.ResultDescription)
 	}
-	if result.TransactionDetail.AffectiveAmount != p.Amount {
+	detail := result.TransactionDetail
+	if strconv.FormatInt(detail.TerminalNumber, 10) != g.terminalID || detail.RefNum != refNum {
+		return nil, payjet.Fault("saman", "verify",
+			"verified transaction does not match the terminal or RefNum", nil)
+	}
+	if detail.AffectiveAmount != p.Amount {
 		return nil, payjet.Mismatch("saman", "verify", payjet.ErrAmountMismatch)
 	}
 	return &payjet.VerifyResult{
 		RefID:      result.TransactionDetail.Rrn,
 		CardNumber: result.TransactionDetail.MaskedPan,
-		OrderID:    params["ResNum"],
+		OrderID:    p.OrderID,
 		Amount:     result.TransactionDetail.AffectiveAmount,
 		RawParams:  params,
 	}, nil

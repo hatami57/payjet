@@ -141,3 +141,30 @@ var (
 	_ PaymentStore     = NewDBPaymentStore()
 	_ TransactionStore = NewDBTransactionStore()
 )
+
+// A payment saved before its Request returned has no token yet; an empty
+// callback key must not find it.
+func TestPaymentStore_EmptyTokenMatchesNothing(t *testing.T) {
+	ctx := context.Background()
+	ps, _ := newTestStores(t)
+	require.NoError(t, ps.SavePayment(ctx, NewStoredPayment("zarinpal", &Payment{
+		OrderID: "o-1", Amount: 1000, CallbackURL: "https://x/cb",
+	})))
+
+	got, err := ps.GetPaymentByToken(ctx, "")
+	require.NoError(t, err)
+	assert.Nil(t, got)
+}
+
+func TestStoredPayment_PaymentCarriesToken(t *testing.T) {
+	sp := NewStoredPayment("parsian", &Payment{
+		OrderID: "o-1", Amount: 1000, CallbackURL: "https://x/cb", Description: "d",
+	})
+	sp.Token = "tok-1"
+
+	p := sp.Payment()
+	assert.Equal(t, "o-1", p.OrderID)
+	assert.Equal(t, int64(1000), p.Amount)
+	assert.Equal(t, "https://x/cb", p.CallbackURL)
+	assert.Equal(t, "tok-1", p.Token)
+}

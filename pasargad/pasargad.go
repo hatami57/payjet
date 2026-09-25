@@ -165,7 +165,7 @@ type verifyResponse struct {
 
 // CallbackOrderID returns the invoiceId (the merchant order ID) Pasargad echoes back.
 func (g *Gateway) CallbackOrderID(params map[string]string) string {
-	return params["invoiceId"]
+	return payjet.Param(params, "invoiceId")
 }
 
 func (g *Gateway) Request(ctx context.Context, p *payjet.Payment) (*payjet.RequestResult, error) {
@@ -202,11 +202,18 @@ func (g *Gateway) Request(ctx context.Context, p *payjet.Payment) (*payjet.Reque
 	}, nil
 }
 
+// Verify confirms the payment. p.Token must be the RequestResult.Token (the
+// purchase UrlId) issued for p: Pasargad's callback carries only invoiceId,
+// status, referenceNumber and trackId, and Verify-Payment needs the UrlId.
 func (g *Gateway) Verify(ctx context.Context, p *payjet.Payment, params map[string]string) (*payjet.VerifyResult, error) {
-	if strings.ToLower(params["status"]) != "success" {
-		return nil, payjet.Declined("pasargad", "verify", params["status"], "")
+	status := payjet.Param(params, "status")
+	if !strings.EqualFold(status, "success") {
+		return nil, payjet.Declined("pasargad", "verify", status, "")
 	}
-	if params["invoiceId"] != p.OrderID {
+	if p.Token == "" {
+		return nil, payjet.Invalid("pasargad", "verify", "Payment.Token (the purchase UrlId) is required to verify a Pasargad payment")
+	}
+	if payjet.Param(params, "invoiceId") != p.OrderID {
 		return nil, payjet.Mismatch("pasargad", "verify", payjet.ErrOrderMismatch)
 	}
 	token, err := g.getToken(ctx)
@@ -216,7 +223,7 @@ func (g *Gateway) Verify(ctx context.Context, p *payjet.Payment, params map[stri
 	var result verifyResponse
 	if err := g.post(ctx, g.verifyPath, token, verifyRequest{
 		Invoice: p.OrderID,
-		UrlId:   params["urlId"],
+		UrlId:   p.Token,
 	}, &result); err != nil {
 		return nil, payjet.Fault("pasargad", "verify", "gateway call failed", err)
 	}
@@ -225,7 +232,7 @@ func (g *Gateway) Verify(ctx context.Context, p *payjet.Payment, params map[stri
 			strconv.Itoa(result.ResultCode), result.ResultMsg)
 	}
 	return &payjet.VerifyResult{
-		RefID:     params["referenceNumber"],
+		RefID:     payjet.Param(params, "referenceNumber"),
 		OrderID:   p.OrderID,
 		Amount:    p.Amount,
 		RawParams: params,

@@ -16,8 +16,9 @@ const (
 
 	// callback status "10" = ready for verification
 	callbackReadyStatus = "10"
-	// verify response status 100 = confirmed
-	verifySuccessStatus = 100
+	// verify response status 100 = confirmed, 101 = confirmed before
+	verifySuccessStatus         = "100"
+	verifyAlreadyVerifiedStatus = "101"
 )
 
 type Gateway struct {
@@ -85,6 +86,31 @@ func (g *Gateway) do(ctx context.Context, method, url string, body, out interfac
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
+// flexString decodes a JSON string or number. IDPay documents status, track_id
+// and amount as strings but has also sent them as numbers.
+type flexString string
+
+func (f *flexString) UnmarshalJSON(b []byte) error {
+	if string(b) == "null" {
+		*f = ""
+		return nil
+	}
+	if len(b) > 0 && b[0] == '"' {
+		var s string
+		if err := json.Unmarshal(b, &s); err != nil {
+			return err
+		}
+		*f = flexString(s)
+		return nil
+	}
+	var n json.Number
+	if err := json.Unmarshal(b, &n); err != nil {
+		return err
+	}
+	*f = flexString(n.String())
+	return nil
+}
+
 // ---- request / verify -------------------------------------------------------
 
 type requestBody struct {
@@ -109,18 +135,29 @@ type verifyBody struct {
 }
 
 type verifyResponse struct {
-	Status  int   `json:"status"`
-	TrackID int64 `json:"track_id"`
+	Status  flexString `json:"status"`
+	TrackID flexString `json:"track_id"`
+	Amount  flexString `json:"amount"`
 	Payment struct {
-		CardNo string `json:"card_no"`
+		Amount flexString `json:"amount"`
+		CardNo string     `json:"card_no"`
 	} `json:"payment"`
 	ErrorCode    int    `json:"error_code"`
 	ErrorMessage string `json:"error_message"`
 }
 
+// verifiedAmount is the amount IDPay reports for the verified payment, or "" if
+// the response carries none.
+func (r *verifyResponse) verifiedAmount() string {
+	if r.Amount != "" {
+		return string(r.Amount)
+	}
+	return string(r.Payment.Amount)
+}
+
 // CallbackOrderID returns the order_id IDPay echoes in the callback.
 func (g *Gateway) CallbackOrderID(params map[string]string) string {
-	return params["order_id"]
+	return payjet.Param(params, "order_id")
 }
 
 func (g *Gateway) Request(ctx context.Context, p *payjet.Payment) (*payjet.RequestResult, error) {
@@ -149,27 +186,51 @@ func (g *Gateway) Request(ctx context.Context, p *payjet.Payment) (*payjet.Reque
 	}, nil
 }
 
+// Verify confirms the payment. The callback's order_id and amount must match p,
+// and when p.Token is set it must match the callback's id.
 func (g *Gateway) Verify(ctx context.Context, p *payjet.Payment, params map[string]string) (*payjet.VerifyResult, error) {
-	if params["status"] != callbackReadyStatus {
-		return nil, payjet.Declined("idpay", "verify",
-			params["status"], "payment not ready for verify")
+	status := payjet.Param(params, "status")
+	if status != callbackReadyStatus {
+		return nil, payjet.Declined("idpay", "verify", status, "payment not ready for verify")
+	}
+	id := payjet.Param(params, "id")
+	if id == "" {
+		return nil, payjet.Fault("idpay", "verify", "no id in callback", nil)
+	}
+	if p.Token != "" && id != p.Token {
+		return nil, payjet.Mismatch("idpay", "verify", payjet.ErrTokenMismatch)
+	}
+	if payjet.Param(params, "order_id") != p.OrderID {
+		return nil, payjet.Mismatch("idpay", "verify", payjet.ErrOrderMismatch)
+	}
+	if amount := payjet.Param(params, "amount"); amount != "" && amount != strconv.FormatInt(p.Amount, 10) {
+		return nil, payjet.Mismatch("idpay", "verify", payjet.ErrAmountMismatch)
 	}
 	var result verifyResponse
 	if err := g.do(ctx, http.MethodPost, g.verifyURL, verifyBody{
-		ID:      params["id"],
-		OrderID: params["order_id"],
+		ID:      id,
+		OrderID: p.OrderID,
 	}, &result); err != nil {
 		return nil, payjet.Fault("idpay", "verify", "gateway call failed", err)
 	}
-	if result.Status != verifySuccessStatus {
+	switch result.Status {
+	case verifySuccessStatus, verifyAlreadyVerifiedStatus:
+	case "":
+		// Failures arrive as {"error_code", "error_message"} with no status.
 		return nil, payjet.Rejected("idpay", "verify",
-			strconv.Itoa(result.Status), result.ErrorMessage)
+			strconv.Itoa(result.ErrorCode), result.ErrorMessage)
+	default:
+		return nil, payjet.Rejected("idpay", "verify", string(result.Status), result.ErrorMessage)
+	}
+	if amount := result.verifiedAmount(); amount != "" && amount != strconv.FormatInt(p.Amount, 10) {
+		return nil, payjet.Mismatch("idpay", "verify", payjet.ErrAmountMismatch)
 	}
 	return &payjet.VerifyResult{
-		RefID:      strconv.FormatInt(result.TrackID, 10),
-		CardNumber: result.Payment.CardNo,
-		OrderID:    params["order_id"],
-		Amount:     p.Amount,
-		RawParams:  params,
+		RefID:           string(result.TrackID),
+		CardNumber:      result.Payment.CardNo,
+		OrderID:         p.OrderID,
+		Amount:          p.Amount,
+		RawParams:       params,
+		AlreadyVerified: result.Status == verifyAlreadyVerifiedStatus,
 	}, nil
 }

@@ -53,6 +53,9 @@ func main() {
 	params := gw.SimulatePayment(p.OrderID, true)
 
 	// 3) Verify — confirm the payment once the user returns to CallbackURL.
+	//    Pass the token Request issued so Verify can check the callback belongs
+	//    to this payment (a real app keeps it with the stored payment).
+	p.Token = req.Token
 	res, err := gw.Verify(ctx, p, params)
 	if err != nil {
 		log.Fatalf("verify failed: %v", err)
