@@ -11,22 +11,28 @@ import (
 	"strings"
 
 	"github.com/majid/payjet"
+	"github.com/majid/payjet/internal/flexjson"
 )
 
 const (
 	defaultRequestURL = "https://api.zarinpal.com/pg/v4/payment/request.json"
 	defaultVerifyURL  = "https://api.zarinpal.com/pg/v4/payment/verify.json"
+	defaultRefundURL  = "https://api.zarinpal.com/pg/v4/payment/refund.json"
 	defaultPaymentURL = "https://www.zarinpal.com/pg/StartPay/"
 
 	sandboxRequestURL = "https://sandbox.zarinpal.com/pg/v4/payment/request.json"
 	sandboxVerifyURL  = "https://sandbox.zarinpal.com/pg/v4/payment/verify.json"
+	sandboxRefundURL  = "https://sandbox.zarinpal.com/pg/v4/payment/refund.json"
 	sandboxPaymentURL = "https://sandbox.zarinpal.com/pg/StartPay/"
 )
+
+var _ payjet.Refunder = (*Gateway)(nil)
 
 type Gateway struct {
 	merchantID string
 	requestURL string
 	verifyURL  string
+	refundURL  string
 	paymentURL string
 	client     *http.Client
 }
@@ -38,6 +44,7 @@ func WithSandbox() Option {
 	return func(g *Gateway) {
 		g.requestURL = sandboxRequestURL
 		g.verifyURL = sandboxVerifyURL
+		g.refundURL = sandboxRefundURL
 		g.paymentURL = sandboxPaymentURL
 	}
 }
@@ -56,11 +63,17 @@ func WithEndpoints(requestURL, verifyURL, paymentURL string) Option {
 	}
 }
 
+// WithRefundURL overrides the refund endpoint.
+func WithRefundURL(refundURL string) Option {
+	return func(g *Gateway) { g.refundURL = refundURL }
+}
+
 func New(merchantID string, opts ...Option) *Gateway {
 	g := &Gateway{
 		merchantID: merchantID,
 		requestURL: defaultRequestURL,
 		verifyURL:  defaultVerifyURL,
+		refundURL:  defaultRefundURL,
 		paymentURL: defaultPaymentURL,
 		client:     payjet.DefaultHTTPClient(),
 	}
@@ -98,6 +111,17 @@ type verifyData struct {
 	Message string `json:"message"`
 	RefID   int64  `json:"ref_id"`
 	CardPan string `json:"card_pan"`
+}
+
+type refundBody struct {
+	MerchantID string `json:"merchant_id"`
+	Authority  string `json:"authority"`
+}
+
+type refundData struct {
+	Code    int             `json:"code"`
+	Message string          `json:"message"`
+	RefID   flexjson.String `json:"ref_id"`
 }
 
 // codePaymentFailed is Zarinpal's error for a payment that did not complete.
@@ -256,5 +280,31 @@ func (g *Gateway) Verify(ctx context.Context, p *payjet.Payment, params map[stri
 		Amount:          p.Amount,
 		RawParams:       params,
 		AlreadyVerified: result.Code == 101,
+	}, nil
+}
+
+// Refund reverses the whole payment. It needs p.Token, the Authority Request
+// issued; v is not used.
+func (g *Gateway) Refund(ctx context.Context, p *payjet.Payment, _ *payjet.VerifyResult) (*payjet.RefundResult, error) {
+	if p.Token == "" {
+		return nil, payjet.Invalid("zarinpal", "refund", "Payment.Token (the Authority) is required to refund")
+	}
+	var result refundData
+	apiErr, err := g.postJSON(ctx, g.refundURL, refundBody{MerchantID: g.merchantID, Authority: p.Token}, &result)
+	if err != nil {
+		return nil, payjet.Fault("zarinpal", "refund", "gateway call failed", err)
+	}
+	if apiErr != nil {
+		return nil, payjet.Rejected("zarinpal", "refund", strconv.Itoa(apiErr.Code), apiErr.Message)
+	}
+	// 101 = refunded before.
+	if result.Code != 100 && result.Code != 101 {
+		return nil, payjet.Rejected("zarinpal", "refund", strconv.Itoa(result.Code), result.Message)
+	}
+	return &payjet.RefundResult{
+		OrderID:         p.OrderID,
+		Amount:          p.Amount,
+		RefID:           string(result.RefID),
+		AlreadyRefunded: result.Code == 101,
 	}, nil
 }

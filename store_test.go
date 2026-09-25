@@ -168,3 +168,14 @@ func TestStoredPayment_PaymentCarriesToken(t *testing.T) {
 	assert.Equal(t, "https://x/cb", p.CallbackURL)
 	assert.Equal(t, "tok-1", p.Token)
 }
+
+func TestTransaction_VerifyResultRoundTrip(t *testing.T) {
+	vr := &VerifyResult{
+		RefID: "ref-1", CardNumber: "6037****1234", OrderID: "o-1", Amount: 5000,
+		RawParams: map[string]string{"RefNum": "rn-1"},
+	}
+
+	got := NewTransaction("saman", vr).VerifyResult()
+
+	assert.Equal(t, vr, got)
+}

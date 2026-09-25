@@ -241,3 +241,76 @@ func TestWithPaths_Override(t *testing.T) {
 	_, _ = gw.Request(context.Background(), testPayment)
 	assert.Equal(t, "/Api/Payment/buy", hitPath)
 }
+
+// ── Refund ────────────────────────────────────────────────────────────────────
+
+// reverseServer serves GetToken and the reverse path, answering the latter with resp.
+func reverseServer(t *testing.T, resp map[string]any) (*pasargad.Gateway, *map[string]any, *string) {
+	t.Helper()
+	var sent map[string]any
+	var auth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/Token/GetToken"):
+			json.NewEncoder(w).Encode(map[string]any{"Token": "bearer-1", "ResultCode": 0})
+		case strings.HasSuffix(r.URL.Path, "/Api/Payment/Reverse-Transactions"):
+			auth = r.Header.Get("Authorization")
+			_ = json.NewDecoder(r.Body).Decode(&sent)
+			json.NewEncoder(w).Encode(resp)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	gw := pasargad.New(pasargad.Config{BaseURL: srv.URL + "/", TerminalNumber: "TERM001", Username: "u", Password: "p"})
+	return gw, &sent, &auth
+}
+
+func TestRefund_Success(t *testing.T) {
+	gw, sent, auth := reverseServer(t, map[string]any{"IsSuccess": true, "Message": "OK"})
+
+	res, err := gw.Refund(context.Background(), withToken("url-id-1"), nil)
+
+	require.NoError(t, err)
+	assert.Equal(t, testPayment.Amount, res.Amount)
+	assert.Equal(t, "Bearer bearer-1", *auth)
+	assert.Equal(t, testPayment.OrderID, (*sent)["Invoice"])
+	assert.Equal(t, "url-id-1", (*sent)["UrlId"])
+}
+
+func TestRefund_ResultCodeShape(t *testing.T) {
+	gw, _, _ := reverseServer(t, map[string]any{"ResultCode": 0, "ResultMsg": "Successful"})
+
+	_, err := gw.Refund(context.Background(), withToken("url-id-1"), nil)
+
+	require.NoError(t, err)
+}
+
+func TestRefund_Rejected(t *testing.T) {
+	gw, _, _ := reverseServer(t, map[string]any{"ResultCode": 13046, "ResultMsg": "reverse not allowed"})
+
+	_, err := gw.Refund(context.Background(), withToken("url-id-1"), nil)
+
+	ce := errorx.GetError(err)
+	require.NotNil(t, ce)
+	assert.Equal(t, "13046", ce.Params["gatewayCode"])
+	assert.Equal(t, "reverse not allowed", ce.Message)
+}
+
+func TestRefund_IsSuccessFalse(t *testing.T) {
+	gw, _, _ := reverseServer(t, map[string]any{"IsSuccess": false, "Message": "failed"})
+
+	_, err := gw.Refund(context.Background(), withToken("url-id-1"), nil)
+
+	require.Error(t, err)
+	assert.True(t, errorx.IsBusinessError(err))
+}
+
+func TestRefund_RequiresToken(t *testing.T) {
+	gw, _, _ := reverseServer(t, map[string]any{"IsSuccess": true})
+
+	_, err := gw.Refund(context.Background(), testPayment, nil)
+
+	assert.True(t, errorx.IsBadRequestError(err))
+}

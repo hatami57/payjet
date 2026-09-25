@@ -291,3 +291,39 @@ func noRedirectClient() *http.Client {
 		},
 	}
 }
+
+// ── Refund ────────────────────────────────────────────────────────────────────
+
+func TestRefund_VerifiedPayment(t *testing.T) {
+	gw := virtual.New("http://localhost:8080/pay")
+	params := gw.SimulatePayment(testPayment.OrderID, true)
+	v, err := gw.Verify(context.Background(), testPayment, params)
+	require.NoError(t, err)
+
+	res, err := gw.Refund(context.Background(), testPayment, v)
+	require.NoError(t, err)
+	assert.False(t, res.AlreadyRefunded)
+	assert.Equal(t, v.RefID, res.RefID)
+
+	again, err := gw.Refund(context.Background(), testPayment, v)
+	require.NoError(t, err)
+	assert.True(t, again.AlreadyRefunded)
+}
+
+func TestRefund_UnverifiedPaymentRejected(t *testing.T) {
+	gw := virtual.New("http://localhost:8080/pay")
+	params := gw.SimulatePayment(testPayment.OrderID, true)
+
+	_, err := gw.Refund(context.Background(), testPayment, &payjet.VerifyResult{RefID: params["TransactionCode"]})
+
+	require.Error(t, err)
+	assert.True(t, errorx.IsBusinessError(err))
+}
+
+func TestRefund_UnknownCodeRejected(t *testing.T) {
+	gw := virtual.New("http://localhost:8080/pay")
+
+	_, err := gw.Refund(context.Background(), testPayment, &payjet.VerifyResult{RefID: "made-up"})
+
+	require.Error(t, err)
+}

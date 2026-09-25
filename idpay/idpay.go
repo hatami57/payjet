@@ -8,6 +8,7 @@ import (
 	"strconv"
 
 	"github.com/majid/payjet"
+	"github.com/majid/payjet/internal/flexjson"
 )
 
 const (
@@ -86,31 +87,6 @@ func (g *Gateway) do(ctx context.Context, method, url string, body, out interfac
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
-// flexString decodes a JSON string or number. IDPay documents status, track_id
-// and amount as strings but has also sent them as numbers.
-type flexString string
-
-func (f *flexString) UnmarshalJSON(b []byte) error {
-	if string(b) == "null" {
-		*f = ""
-		return nil
-	}
-	if len(b) > 0 && b[0] == '"' {
-		var s string
-		if err := json.Unmarshal(b, &s); err != nil {
-			return err
-		}
-		*f = flexString(s)
-		return nil
-	}
-	var n json.Number
-	if err := json.Unmarshal(b, &n); err != nil {
-		return err
-	}
-	*f = flexString(n.String())
-	return nil
-}
-
 // ---- request / verify -------------------------------------------------------
 
 type requestBody struct {
@@ -135,12 +111,12 @@ type verifyBody struct {
 }
 
 type verifyResponse struct {
-	Status  flexString `json:"status"`
-	TrackID flexString `json:"track_id"`
-	Amount  flexString `json:"amount"`
+	Status  flexjson.String `json:"status"`
+	TrackID flexjson.String `json:"track_id"`
+	Amount  flexjson.String `json:"amount"`
 	Payment struct {
-		Amount flexString `json:"amount"`
-		CardNo string     `json:"card_no"`
+		Amount flexjson.String `json:"amount"`
+		CardNo string          `json:"card_no"`
 	} `json:"payment"`
 	ErrorCode    int    `json:"error_code"`
 	ErrorMessage string `json:"error_message"`

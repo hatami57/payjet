@@ -235,3 +235,54 @@ func TestVerify_CaseInsensitiveCallback(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "rrn-9", res.RefID)
 }
+
+// ── Refund ────────────────────────────────────────────────────────────────────
+
+func reverseServer(t *testing.T, resp map[string]any) (*saman.Gateway, *map[string]any) {
+	t.Helper()
+	var sent map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&sent)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	t.Cleanup(srv.Close)
+	return saman.New("123456789", saman.WithReverseURL(srv.URL)), &sent
+}
+
+var verified = &payjet.VerifyResult{
+	RefID:     "rrn-1",
+	OrderID:   "order-77",
+	RawParams: map[string]string{"Status": "2", "ResNum": "order-77", "RefNum": "ref-num-001"},
+}
+
+func TestRefund_Success(t *testing.T) {
+	gw, sent := reverseServer(t, map[string]any{"ResultCode": 0, "ResultDescription": "OK", "Success": true})
+
+	res, err := gw.Refund(context.Background(), testPayment, verified)
+
+	require.NoError(t, err)
+	assert.Equal(t, "ref-num-001", res.RefID)
+	assert.Equal(t, testPayment.Amount, res.Amount)
+	assert.Equal(t, "ref-num-001", (*sent)["RefNum"])
+	assert.Equal(t, "123456789", (*sent)["TerminalNumber"])
+}
+
+func TestRefund_Rejected(t *testing.T) {
+	gw, _ := reverseServer(t, map[string]any{"ResultCode": -2, "ResultDescription": "تراکنش یافت نشد", "Success": false})
+
+	_, err := gw.Refund(context.Background(), testPayment, verified)
+
+	ce := errorx.GetError(err)
+	require.NotNil(t, ce)
+	assert.Equal(t, "-2", ce.Params["gatewayCode"])
+	assert.Equal(t, "refund", ce.Params["op"])
+}
+
+func TestRefund_RequiresRefNum(t *testing.T) {
+	gw, _ := reverseServer(t, map[string]any{"Success": true})
+
+	_, err := gw.Refund(context.Background(), testPayment, &payjet.VerifyResult{RefID: "rrn-1"})
+
+	assert.True(t, errorx.IsBadRequestError(err))
+}

@@ -14,13 +14,17 @@ const (
 	defaultTokenURL   = "https://sep.shaparak.ir/onlinepg/onlinepg"
 	defaultPaymentURL = "https://sep.shaparak.ir/OnlinePG/OnlinePG"
 	defaultVerifyURL  = "https://sep.shaparak.ir/verifyTxnRandomSessionkey/ipg/VerifyTransaction"
+	defaultReverseURL = "https://sep.shaparak.ir/verifyTxnRandomSessionkey/ipg/ReverseTransaction"
 )
+
+var _ payjet.Refunder = (*Gateway)(nil)
 
 type Gateway struct {
 	terminalID string
 	tokenURL   string
 	paymentURL string
 	verifyURL  string
+	reverseURL string
 	client     *http.Client
 }
 
@@ -47,12 +51,18 @@ func WithEndpoints(tokenURL, paymentURL, verifyURL string) Option {
 	}
 }
 
+// WithReverseURL overrides the reverse (refund) endpoint.
+func WithReverseURL(reverseURL string) Option {
+	return func(g *Gateway) { g.reverseURL = reverseURL }
+}
+
 func New(terminalID string, opts ...Option) *Gateway {
 	g := &Gateway{
 		terminalID: terminalID,
 		tokenURL:   defaultTokenURL,
 		paymentURL: defaultPaymentURL,
 		verifyURL:  defaultVerifyURL,
+		reverseURL: defaultReverseURL,
 		client:     payjet.DefaultHTTPClient(),
 	}
 	for _, o := range opts {
@@ -188,4 +198,35 @@ func (g *Gateway) Verify(ctx context.Context, p *payjet.Payment, params map[stri
 		Amount:     result.TransactionDetail.AffectiveAmount,
 		RawParams:  params,
 	}, nil
+}
+
+// reverseResponse is ReverseTransaction's reply; it shares the verify shape.
+type reverseResponse struct {
+	ResultCode        int    `json:"ResultCode"`
+	ResultDescription string `json:"ResultDescription"`
+	Success           bool   `json:"Success"`
+}
+
+// Refund reverses the whole payment. It needs the RefNum of the verified
+// callback, read from v.RawParams.
+func (g *Gateway) Refund(ctx context.Context, p *payjet.Payment, v *payjet.VerifyResult) (*payjet.RefundResult, error) {
+	var refNum string
+	if v != nil {
+		refNum = payjet.Param(v.RawParams, "RefNum")
+	}
+	if refNum == "" {
+		return nil, payjet.Invalid("saman", "refund", "the verified callback's RefNum is required to refund")
+	}
+	var result reverseResponse
+	if err := g.postJSON(ctx, g.reverseURL, verifyRequest{
+		RefNum:         refNum,
+		TerminalNumber: g.terminalID,
+	}, &result); err != nil {
+		return nil, payjet.Fault("saman", "refund", "gateway call failed", err)
+	}
+	if !result.Success {
+		return nil, payjet.Rejected("saman", "refund",
+			strconv.Itoa(result.ResultCode), result.ResultDescription)
+	}
+	return &payjet.RefundResult{OrderID: p.OrderID, Amount: p.Amount, RefID: refNum}, nil
 }

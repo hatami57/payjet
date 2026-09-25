@@ -63,4 +63,15 @@ func main() {
 
 	fmt.Printf("payment verified: refID=%s amount=%d card=%s\n",
 		res.RefID, res.Amount, res.CardNumber)
+
+	// 4) Refund — gateways that can reverse a verified payment implement
+	//    payjet.Refunder. A real app rebuilds res from its stored Transaction
+	//    with Transaction.VerifyResult().
+	if r, ok := payjet.Gateway(gw).(payjet.Refunder); ok {
+		ref, err := r.Refund(ctx, p, res)
+		if err != nil {
+			log.Fatalf("refund failed: %v", err)
+		}
+		fmt.Printf("payment refunded: amount=%d ref=%s\n", ref.Amount, ref.RefID)
+	}
 }

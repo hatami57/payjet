@@ -260,6 +260,58 @@ The sentinels above still work: they are carried as the error's `Inner`, so
 `errors.Is(err, payjet.ErrCancelled)` and the category checks both hold on the
 same error.
 
+## Refunds
+
+Gateways that can reverse a verified payment implement `payjet.Refunder`:
+Zarinpal, Saman, Parsian, Mellat, Pasargad and the virtual gateway. IDPay has no
+refund API. A refund always reverses the whole payment.
+
+```go
+type Refunder interface {
+    Refund(ctx context.Context, p *Payment, v *VerifyResult) (*RefundResult, error)
+}
+
+type RefundResult struct {
+    OrderID         string
+    Amount          int64  // always the whole payment, in Rials
+    RefID           string // the gateway's refund reference, when it reports one
+    AlreadyRefunded bool   // the gateway had refunded this payment before
+}
+```
+
+Pass the payment with its `Token` and the `VerifyResult` of its verification.
+After persistence, rebuild both from the stores:
+
+```go
+r, ok := gw.(payjet.Refunder)
+if !ok {
+    return errors.New("this gateway cannot refund")
+}
+sp, _ := ps.GetPayment(ctx, orderID)
+tx, _ := ts.GetTransaction(ctx, orderID)
+
+res, err := r.Refund(ctx, sp.Payment(), tx.VerifyResult())
+if err != nil {
+    return err // a Business error carries the bank's code in gatewayCode
+}
+_ = ps.SetStatus(ctx, orderID, payjet.StatusRefunded)
+```
+
+Each gateway needs a different piece of the original payment:
+
+| Gateway   | Needs                                      | Bank call                        |
+| --------- | ------------------------------------------ | -------------------------------- |
+| Zarinpal  | `Payment.Token` (Authority)                | `refund.json`                    |
+| Saman     | `RefNum` in `VerifyResult.RawParams`       | `ReverseTransaction`             |
+| Parsian   | `Payment.Token`                            | `ReversalRequest`                |
+| Mellat    | numeric `OrderID`, `VerifyResult.RefID`    | `bpReversalRequest`              |
+| Pasargad  | `Payment.Token` (UrlId)                    | `Api/Payment/Reverse-Transactions` |
+| virtual   | `VerifyResult.RefID` from its own Verify   | none                             |
+
+Banks limit when and how often a payment can be reversed, and the rules differ
+per bank and contract. A refused reversal comes back as a `Rejected` error with
+the bank's code.
+
 ## Callback lookup
 
 Each gateway echoes a different field in its callback, so `CallbackOrderID`
@@ -284,6 +336,9 @@ mellat.New(cfg, mellat.WithEnglishPage())             // English payment page
 gw := zarinpal.New(id, zarinpal.WithHTTPClient(c))    // custom *http.Client
 gw := saman.New(id, saman.WithEndpoints(t, p, v))     // override URLs (testing)
 ```
+
+The refund endpoints have their own options: `zarinpal.WithRefundURL`,
+`parsian.WithRefundURL`, `saman.WithReverseURL` and `pasargad.WithReversePath`.
 
 Mellat and Pasargad take a config struct for their credentials:
 

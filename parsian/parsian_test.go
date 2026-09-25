@@ -262,3 +262,61 @@ func TestVerify_CapitalizedCallbackFields(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "998877", res.RefID)
 }
+
+// ── Refund ────────────────────────────────────────────────────────────────────
+
+const refundNS = "https://pec.Shaparak.ir/NewIPGServices/Reversal/ReversalService"
+
+func reversalResponse(status, message string) string {
+	return fmt.Sprintf(`<?xml version="1.0"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Body>
+    <ReversalRequestResponse xmlns="%s">
+      <ReversalRequestResult><Status>%s</Status><Message>%s</Message><Token>tok</Token></ReversalRequestResult>
+    </ReversalRequestResponse>
+  </soap:Body>
+</soap:Envelope>`, refundNS, status, message)
+}
+
+func reversalServer(t *testing.T, status, message string) (*parsian.Gateway, *string) {
+	t.Helper()
+	var body string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		body = string(b)
+		w.Write([]byte(reversalResponse(status, message)))
+	}))
+	t.Cleanup(srv.Close)
+	return parsian.New("acc", parsian.WithRefundURL(srv.URL)), &body
+}
+
+func TestRefund_Success(t *testing.T) {
+	gw, body := reversalServer(t, "0", "")
+
+	res, err := gw.Refund(context.Background(), withToken("tok-9"), nil)
+
+	require.NoError(t, err)
+	assert.Equal(t, testPayment.Amount, res.Amount)
+	assert.Contains(t, *body, "<rev:ReversalRequest>")
+	assert.Contains(t, *body, "<rev:LoginAccount>acc</rev:LoginAccount>")
+	assert.Contains(t, *body, "<rev:Token>tok-9</rev:Token>")
+}
+
+func TestRefund_Rejected(t *testing.T) {
+	gw, _ := reversalServer(t, "-138", "تراکنش قابل برگشت نیست")
+
+	_, err := gw.Refund(context.Background(), withToken("tok"), nil)
+
+	ce := errorx.GetError(err)
+	require.NotNil(t, ce)
+	assert.Equal(t, "-138", ce.Params["gatewayCode"])
+	assert.Equal(t, "refund", ce.Params["op"])
+}
+
+func TestRefund_RequiresToken(t *testing.T) {
+	gw, _ := reversalServer(t, "0", "")
+
+	_, err := gw.Refund(context.Background(), testPayment, nil)
+
+	assert.True(t, errorx.IsBadRequestError(err))
+}

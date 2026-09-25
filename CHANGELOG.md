@@ -4,6 +4,40 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Refunds, following Parbad.** Gateways that can reverse a verified payment
+  implement the new optional `payjet.Refunder` interface:
+  `Refund(ctx, p, v) (*RefundResult, error)`. The `Gateway` interface is
+  unchanged, so callers check for it with a type assertion. A refund reverses
+  the whole payment, as every Parbad implementation does.
+  - **Zarinpal:** `refund.json` with the Authority (`Payment.Token`); code 101
+    is `AlreadyRefunded`. Sandbox mode uses the sandbox refund endpoint.
+  - **Saman:** `ReverseTransaction` with the verified callback's `RefNum`.
+  - **Parsian:** `ReversalRequest` with `Payment.Token`.
+  - **Mellat:** `bpReversalRequest` with the order and the verified
+    `SaleReferenceId`; code 48 is `AlreadyRefunded`.
+  - **Pasargad:** `Api/Payment/Reverse-Transactions` with the invoice and UrlId
+    (`Payment.Token`). Both the `{IsSuccess, Message}` response Parbad reads and
+    the `{ResultCode, ResultMsg}` shape of Pasargad's other endpoints are
+    understood.
+  - **Virtual:** refunds a transaction code it issued and verified; a repeat is
+    `AlreadyRefunded`.
+  - **IDPay** has no refund API and does not implement `Refunder`.
+- `RefundResult` (`OrderID`, `Amount`, `RefID`, `AlreadyRefunded`),
+  `StatusRefunded`, and `Transaction.VerifyResult()` to rebuild the
+  `VerifyResult` a refund needs from a stored transaction.
+- Endpoint options for the refund calls: `zarinpal.WithRefundURL`,
+  `parsian.WithRefundURL`, `saman.WithReverseURL` and
+  `pasargad.WithReversePath`.
+
+### Changed
+
+- The string-or-number JSON decoding IDPay needed moved to an internal package
+  so Zarinpal's refund reference can use it too.
+
 ## [0.9.0] - 2026-09-25
 
 Reviewed every gateway against [Parbad](https://github.com/Sina-Soltani/Parbad).

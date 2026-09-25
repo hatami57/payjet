@@ -18,7 +18,10 @@ const (
 	defaultGetTokenPath = "Token/GetToken"
 	defaultPurchasePath = "Api/Payment/purchase"
 	defaultVerifyPath   = "Api/Payment/Verify-Payment"
+	defaultReversePath  = "Api/Payment/Reverse-Transactions"
 )
+
+var _ payjet.Refunder = (*Gateway)(nil)
 
 type Gateway struct {
 	baseURL        string
@@ -28,6 +31,7 @@ type Gateway struct {
 	getTokenPath   string
 	purchasePath   string
 	verifyPath     string
+	reversePath    string
 	client         *http.Client
 }
 
@@ -54,6 +58,11 @@ func WithPaths(getTokenPath, purchasePath, verifyPath string) Option {
 	}
 }
 
+// WithReversePath overrides the reverse (refund) API path relative to the base URL.
+func WithReversePath(reversePath string) Option {
+	return func(g *Gateway) { g.reversePath = reversePath }
+}
+
 // Config holds the merchant settings for a Pasargad terminal. BaseURL is
 // merchant-specific and provided by the bank (e.g. "https://ipg.pasargadbank.ir/api/").
 type Config struct {
@@ -73,6 +82,7 @@ func New(cfg Config, opts ...Option) *Gateway {
 		getTokenPath:   defaultGetTokenPath,
 		purchasePath:   defaultPurchasePath,
 		verifyPath:     defaultVerifyPath,
+		reversePath:    defaultReversePath,
 		client:         payjet.DefaultHTTPClient(),
 	}
 	for _, o := range opts {
@@ -237,4 +247,56 @@ func (g *Gateway) Verify(ctx context.Context, p *payjet.Payment, params map[stri
 		Amount:    p.Amount,
 		RawParams: params,
 	}, nil
+}
+
+type reverseRequest struct {
+	Invoice string `json:"Invoice"`
+	UrlId   string `json:"UrlId"`
+}
+
+// reverseResponse covers both shapes Pasargad's reverse API is known by:
+// {IsSuccess, Message} (as Parbad reads it) and the {ResultCode, ResultMsg}
+// its other endpoints return.
+type reverseResponse struct {
+	IsSuccess  bool   `json:"IsSuccess"`
+	Message    string `json:"Message"`
+	ResultCode *int   `json:"ResultCode"`
+	ResultMsg  string `json:"ResultMsg"`
+}
+
+func (r *reverseResponse) failure() (code, message string, failed bool) {
+	if r.IsSuccess || (r.ResultCode != nil && *r.ResultCode == 0) {
+		return "", "", false
+	}
+	message = r.Message
+	if message == "" {
+		message = r.ResultMsg
+	}
+	if r.ResultCode != nil {
+		code = strconv.Itoa(*r.ResultCode)
+	}
+	return code, message, true
+}
+
+// Refund reverses the whole payment. It needs p.Token, the purchase UrlId
+// Request issued; v is not used.
+func (g *Gateway) Refund(ctx context.Context, p *payjet.Payment, _ *payjet.VerifyResult) (*payjet.RefundResult, error) {
+	if p.Token == "" {
+		return nil, payjet.Invalid("pasargad", "refund", "Payment.Token (the purchase UrlId) is required to refund a Pasargad payment")
+	}
+	token, err := g.getToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var result reverseResponse
+	if err := g.post(ctx, g.reversePath, token, reverseRequest{
+		Invoice: p.OrderID,
+		UrlId:   p.Token,
+	}, &result); err != nil {
+		return nil, payjet.Fault("pasargad", "refund", "gateway call failed", err)
+	}
+	if code, message, failed := result.failure(); failed {
+		return nil, payjet.Rejected("pasargad", "refund", code, message)
+	}
+	return &payjet.RefundResult{OrderID: p.OrderID, Amount: p.Amount, RefID: p.Token}, nil
 }

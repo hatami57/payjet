@@ -16,16 +16,19 @@ import (
 const (
 	defaultRequestURL = "https://pec.shaparak.ir/NewIPGServices/Sale/SaleService.asmx"
 	defaultVerifyURL  = "https://pec.shaparak.ir/NewIPGServices/Confirm/ConfirmService.asmx"
+	defaultRefundURL  = "https://pec.shaparak.ir/NewIPGServices/Reverse/ReversalService.asmx"
 	defaultPaymentURL = "https://pec.shaparak.ir/NewIPG/"
 
 	requestNS = "https://pec.Shaparak.ir/NewIPGServices/Sale/SaleService"
 	verifyNS  = "https://pec.Shaparak.ir/NewIPGServices/Confirm/ConfirmService"
+	refundNS  = "https://pec.Shaparak.ir/NewIPGServices/Reversal/ReversalService"
 )
 
 type Gateway struct {
 	loginAccount string
 	requestURL   string
 	verifyURL    string
+	refundURL    string
 	paymentURL   string
 	client       *http.Client
 }
@@ -53,11 +56,17 @@ func WithEndpoints(requestURL, verifyURL, paymentURL string) Option {
 	}
 }
 
+// WithRefundURL overrides the reversal (refund) endpoint.
+func WithRefundURL(refundURL string) Option {
+	return func(g *Gateway) { g.refundURL = refundURL }
+}
+
 func New(loginAccount string, opts ...Option) *Gateway {
 	g := &Gateway{
 		loginAccount: loginAccount,
 		requestURL:   defaultRequestURL,
 		verifyURL:    defaultVerifyURL,
+		refundURL:    defaultRefundURL,
 		paymentURL:   defaultPaymentURL,
 		client:       payjet.DefaultHTTPClient(),
 	}
@@ -100,6 +109,8 @@ func xmlNodeValue(data, localName, ns string) string {
 	}
 	return ""
 }
+
+var _ payjet.Refunder = (*Gateway)(nil)
 
 // ---- request / verify -------------------------------------------------------
 
@@ -205,4 +216,33 @@ func (g *Gateway) Verify(ctx context.Context, p *payjet.Payment, params map[stri
 		Amount:    p.Amount,
 		RawParams: params,
 	}, nil
+}
+
+// Refund reverses the whole payment. It needs p.Token, the token Request
+// issued; v is not used.
+func (g *Gateway) Refund(ctx context.Context, p *payjet.Payment, _ *payjet.VerifyResult) (*payjet.RefundResult, error) {
+	if p.Token == "" {
+		return nil, payjet.Invalid("parsian", "refund", "Payment.Token is required to refund a Parsian payment")
+	}
+	envelope := fmt.Sprintf(
+		`<?xml version="1.0" encoding="UTF-8"?>`+
+			`<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:rev="%s">`+
+			`<soapenv:Header/><soapenv:Body>`+
+			`<rev:ReversalRequest><rev:requestData>`+
+			`<rev:LoginAccount>%s</rev:LoginAccount>`+
+			`<rev:Token>%s</rev:Token>`+
+			`</rev:requestData></rev:ReversalRequest>`+
+			`</soapenv:Body></soapenv:Envelope>`,
+		refundNS, xmlEscape(g.loginAccount), xmlEscape(p.Token),
+	)
+	data, err := soap.Post(ctx, g.client, g.refundURL, `"ReversalRequest"`, envelope)
+	if err != nil {
+		return nil, payjet.Fault("parsian", "refund", "ReversalRequest call failed", err)
+	}
+	raw := string(data)
+	status := xmlNodeValue(raw, "Status", refundNS)
+	if status != "0" {
+		return nil, payjet.Rejected("parsian", "refund", status, xmlNodeValue(raw, "Message", refundNS))
+	}
+	return &payjet.RefundResult{OrderID: p.OrderID, Amount: p.Amount, RefID: p.Token}, nil
 }

@@ -16,6 +16,8 @@ const (
 	// StatusFailed is a payment the gateway declined, the user cancelled, or
 	// that failed verification.
 	StatusFailed PaymentStatus = "failed"
+	// StatusRefunded is a verified payment that Refunder.Refund reversed.
+	StatusRefunded PaymentStatus = "refunded"
 )
 
 // StoredPayment is the persisted record of a payment/order: the merchant intent
@@ -90,6 +92,18 @@ type Transaction struct {
 
 // TableName is the table the default store persists transactions into.
 func (Transaction) TableName() string { return "payjet_transactions" }
+
+// VerifyResult rebuilds the VerifyResult the transaction was recorded from, to
+// pass to Refunder.Refund.
+func (t *Transaction) VerifyResult() *VerifyResult {
+	return &VerifyResult{
+		RefID:      t.RefID,
+		CardNumber: t.CardNumber,
+		OrderID:    t.OrderID,
+		Amount:     t.Amount,
+		RawParams:  t.RawParams,
+	}
+}
 
 // NewTransaction builds a succeeded Transaction for the given gateway from a
 // VerifyResult.

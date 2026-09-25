@@ -273,3 +273,9 @@ func TestVerify_ErrorResponseCarriesErrorCode(t *testing.T) {
 	require.NotNil(t, ce)
 	assert.Equal(t, "53", ce.Params["gatewayCode"])
 }
+
+// IDPay has no refund API, so its gateway must not claim to refund.
+func TestNotARefunder(t *testing.T) {
+	_, ok := any(idpay.New("k")).(payjet.Refunder)
+	assert.False(t, ok)
+}

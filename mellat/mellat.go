@@ -119,6 +119,8 @@ func (g *Gateway) call(ctx context.Context, action, innerXML string) (string, er
 	return strings.TrimSpace(env.Body.Response.Return), nil
 }
 
+var _ payjet.Refunder = (*Gateway)(nil)
+
 // ---- request / verify -------------------------------------------------------
 
 // CallbackOrderID returns the SaleOrderId (the merchant order ID) Mellat echoes back.
@@ -272,4 +274,48 @@ func (g *Gateway) settle(ctx context.Context, orderID, saleOrderID, saleRefID in
 		return payjet.Rejected("mellat", "settle", code, "")
 	}
 	return nil
+}
+
+// Refund reverses the whole payment with bpReversalRequest. It needs the
+// SaleReferenceId Verify returned as v.RefID.
+func (g *Gateway) Refund(ctx context.Context, p *payjet.Payment, v *payjet.VerifyResult) (*payjet.RefundResult, error) {
+	orderID, err := strconv.ParseInt(p.OrderID, 10, 64)
+	if err != nil {
+		return nil, payjet.Invalid("mellat", "refund",
+			fmt.Sprintf("OrderID must be numeric, got %q", p.OrderID))
+	}
+	if v == nil || v.RefID == "" {
+		return nil, payjet.Invalid("mellat", "refund", "the verified SaleReferenceId (VerifyResult.RefID) is required to refund")
+	}
+	saleRefID, err := strconv.ParseInt(v.RefID, 10, 64)
+	if err != nil {
+		return nil, payjet.Invalid("mellat", "refund",
+			fmt.Sprintf("SaleReferenceId must be numeric, got %q", v.RefID))
+	}
+	body := fmt.Sprintf(
+		`<int:bpReversalRequest>`+
+			`<terminalId>%d</terminalId>`+
+			`<userName>%s</userName>`+
+			`<userPassword>%s</userPassword>`+
+			`<orderId>%d</orderId>`+
+			`<saleOrderId>%d</saleOrderId>`+
+			`<saleReferenceId>%d</saleReferenceId>`+
+			`</int:bpReversalRequest>`,
+		g.terminalID, xmlEscape(g.username), xmlEscape(g.password),
+		orderID, orderID, saleRefID,
+	)
+	code, err := g.call(ctx, "bpReversalRequest", body)
+	if err != nil {
+		return nil, payjet.Fault("mellat", "refund", "bpReversalRequest call failed", err)
+	}
+	// 48 = reversed before.
+	if code != "0" && code != "48" {
+		return nil, payjet.Rejected("mellat", "refund", code, "")
+	}
+	return &payjet.RefundResult{
+		OrderID:         p.OrderID,
+		Amount:          p.Amount,
+		RefID:           v.RefID,
+		AlreadyRefunded: code == "48",
+	}, nil
 }

@@ -242,7 +242,8 @@ func errorServer(t *testing.T, status int, errors string) *zarinpal.Gateway {
 		w.Write([]byte(`{"data":[],"errors":` + errors + `}`))
 	}))
 	t.Cleanup(srv.Close)
-	return zarinpal.New("test-merchant-id", zarinpal.WithEndpoints(srv.URL, srv.URL, srv.URL))
+	return zarinpal.New("test-merchant-id",
+		zarinpal.WithEndpoints(srv.URL, srv.URL, srv.URL), zarinpal.WithRefundURL(srv.URL))
 }
 
 func TestRequest_ErrorEnvelopeIsRejection(t *testing.T) {
@@ -304,4 +305,68 @@ func TestVerify_CaseInsensitiveCallback(t *testing.T) {
 	res, err := gw.Verify(context.Background(), testPayment, params)
 	require.NoError(t, err)
 	assert.Equal(t, "42", res.RefID)
+}
+
+// ── Refund ────────────────────────────────────────────────────────────────────
+
+// refundServer answers the refund endpoint with data and records the request body.
+func refundServer(t *testing.T, data string) (*zarinpal.Gateway, *map[string]any) {
+	t.Helper()
+	var sent map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&sent)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"data":` + data + `,"errors":[]}`))
+	}))
+	t.Cleanup(srv.Close)
+	return zarinpal.New("test-merchant-id", zarinpal.WithRefundURL(srv.URL)), &sent
+}
+
+func paidPayment() *payjet.Payment {
+	p := *testPayment
+	p.Token = "A00000000000000000000000000000000001"
+	return &p
+}
+
+func TestRefund_Success(t *testing.T) {
+	gw, sent := refundServer(t, `{"code":100,"message":"Success","ref_id":"R-1","iban":"IR00"}`)
+
+	res, err := gw.Refund(context.Background(), paidPayment(), nil)
+
+	require.NoError(t, err)
+	assert.Equal(t, "R-1", res.RefID)
+	assert.Equal(t, testPayment.Amount, res.Amount)
+	assert.False(t, res.AlreadyRefunded)
+	assert.Equal(t, "test-merchant-id", (*sent)["merchant_id"])
+	assert.Equal(t, paidPayment().Token, (*sent)["authority"])
+}
+
+func TestRefund_AlreadyRefunded(t *testing.T) {
+	gw, _ := refundServer(t, `{"code":101,"message":"Refunded before","ref_id":12345}`)
+
+	res, err := gw.Refund(context.Background(), paidPayment(), nil)
+
+	require.NoError(t, err)
+	assert.True(t, res.AlreadyRefunded)
+	assert.Equal(t, "12345", res.RefID)
+}
+
+func TestRefund_ErrorEnvelopeIsRejection(t *testing.T) {
+	gw := errorServer(t, http.StatusUnprocessableEntity, `{"code":-60,"message":"Session can not be reversed."}`)
+
+	_, err := gw.Refund(context.Background(), paidPayment(), nil)
+
+	ce := errorx.GetError(err)
+	require.NotNil(t, ce)
+	assert.True(t, errorx.IsBusinessError(err))
+	assert.Equal(t, "-60", ce.Params["gatewayCode"])
+	assert.Equal(t, "refund", ce.Params["op"])
+}
+
+func TestRefund_RequiresToken(t *testing.T) {
+	gw, _ := refundServer(t, `{"code":100}`)
+
+	_, err := gw.Refund(context.Background(), testPayment, nil)
+
+	assert.True(t, errorx.IsBadRequestError(err))
 }

@@ -289,3 +289,62 @@ func TestRequest_SOAPFaultIsGatewayFault(t *testing.T) {
 	require.NotNil(t, ce.Inner)
 	assert.Contains(t, ce.Inner.Error(), "invalid terminal")
 }
+
+// ── Refund ────────────────────────────────────────────────────────────────────
+
+func reversalServer(t *testing.T, ret string) (*mellat.Gateway, *string) {
+	t.Helper()
+	var body string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		body = string(b)
+		w.Write([]byte(soapResponse("bpReversalRequest", ret)))
+	}))
+	t.Cleanup(srv.Close)
+	return mellat.New(mellat.Config{TerminalID: 12345, Username: "user", Password: "pass"},
+		mellat.WithEndpoints(srv.URL, mellat.DefaultPaymentURL)), &body
+}
+
+var verifiedPayment = &payjet.VerifyResult{RefID: "127926981246", OrderID: "100001"}
+
+func TestRefund_Success(t *testing.T) {
+	gw, body := reversalServer(t, "0")
+
+	res, err := gw.Refund(context.Background(), testPayment, verifiedPayment)
+
+	require.NoError(t, err)
+	assert.False(t, res.AlreadyRefunded)
+	assert.Equal(t, "127926981246", res.RefID)
+	assert.Contains(t, *body, "<int:bpReversalRequest>")
+	assert.Contains(t, *body, "<orderId>100001</orderId>")
+	assert.Contains(t, *body, "<saleOrderId>100001</saleOrderId>")
+	assert.Contains(t, *body, "<saleReferenceId>127926981246</saleReferenceId>")
+}
+
+func TestRefund_AlreadyReversed_Code48(t *testing.T) {
+	gw, _ := reversalServer(t, "48")
+
+	res, err := gw.Refund(context.Background(), testPayment, verifiedPayment)
+
+	require.NoError(t, err)
+	assert.True(t, res.AlreadyRefunded)
+}
+
+func TestRefund_Rejected(t *testing.T) {
+	gw, _ := reversalServer(t, "45") // already settled
+
+	_, err := gw.Refund(context.Background(), testPayment, verifiedPayment)
+
+	ce := errorx.GetError(err)
+	require.NotNil(t, ce)
+	assert.Equal(t, "45", ce.Params["gatewayCode"])
+	assert.Equal(t, "refund", ce.Params["op"])
+}
+
+func TestRefund_RequiresSaleReferenceID(t *testing.T) {
+	gw, _ := reversalServer(t, "0")
+
+	_, err := gw.Refund(context.Background(), testPayment, &payjet.VerifyResult{})
+
+	assert.True(t, errorx.IsBadRequestError(err))
+}

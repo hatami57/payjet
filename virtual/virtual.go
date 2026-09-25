@@ -39,7 +39,10 @@ type issuedTx struct {
 	orderID  string
 	token    string
 	verified bool
+	refunded bool
 }
+
+var _ payjet.Refunder = (*Gateway)(nil)
 
 type pendingPayment struct {
 	token       string
@@ -140,6 +143,33 @@ func (g *Gateway) Verify(_ context.Context, p *payjet.Payment, params map[string
 		Amount:          p.Amount,
 		RawParams:       params,
 		AlreadyVerified: alreadyVerified,
+	}, nil
+}
+
+// Refund reverses a payment this gateway verified. v.RefID must be the
+// transaction code Verify returned for p's order; a code refunded before
+// returns AlreadyRefunded.
+func (g *Gateway) Refund(_ context.Context, p *payjet.Payment, v *payjet.VerifyResult) (*payjet.RefundResult, error) {
+	if p == nil || v == nil {
+		return nil, payjet.Invalid("virtual", "refund", "payment and verify result are required")
+	}
+	g.mu.Lock()
+	tx, ok := g.issued[v.RefID]
+	valid := ok && tx.orderID == p.OrderID && tx.verified
+	alreadyRefunded := tx.refunded
+	if valid {
+		tx.refunded = true
+		g.issued[v.RefID] = tx
+	}
+	g.mu.Unlock()
+	if !valid {
+		return nil, payjet.Rejected("virtual", "refund", "", "no verified transaction with this code for the order")
+	}
+	return &payjet.RefundResult{
+		OrderID:         p.OrderID,
+		Amount:          p.Amount,
+		RefID:           v.RefID,
+		AlreadyRefunded: alreadyRefunded,
 	}, nil
 }
 

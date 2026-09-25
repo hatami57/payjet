@@ -48,6 +48,31 @@ type Gateway interface {
 	CallbackOrderID(params map[string]string) string
 }
 
+// Refunder is implemented by the gateways that can refund a verified payment:
+// Zarinpal, Saman, Parsian, Mellat, Pasargad and virtual. IDPay has no refund
+// API. Check for it with a type assertion:
+//
+//	if r, ok := gw.(payjet.Refunder); ok {
+//	    res, err := r.Refund(ctx, p, v)
+//	}
+type Refunder interface {
+	// Refund reverses the whole verified payment; no gateway takes a partial
+	// amount. p is the payment with its Token set, and v the VerifyResult
+	// Verify returned for it — rebuild it from a stored Transaction with
+	// Transaction.VerifyResult.
+	Refund(ctx context.Context, p *Payment, v *VerifyResult) (*RefundResult, error)
+}
+
+// RefundResult is returned by a successful Refunder.Refund.
+type RefundResult struct {
+	OrderID string
+	Amount  int64  // refunded amount in Rials: always the whole payment
+	RefID   string // the gateway's refund reference, when it reports one
+	// AlreadyRefunded reports that the gateway had refunded this payment before
+	// (e.g. Zarinpal code 101, Mellat code 48).
+	AlreadyRefunded bool
+}
+
 // Payment holds the details for a payment transaction.
 type Payment struct {
 	Amount      int64  // in Rials
