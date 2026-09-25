@@ -8,6 +8,7 @@ import (
 	"strconv"
 
 	"github.com/majid/payjet"
+	"github.com/majid/payjet/internal/flexjson"
 )
 
 const (
@@ -20,12 +21,13 @@ const (
 var _ payjet.Refunder = (*Gateway)(nil)
 
 type Gateway struct {
-	terminalID string
-	tokenURL   string
-	paymentURL string
-	verifyURL  string
-	reverseURL string
-	client     *http.Client
+	terminalID    string
+	tokenURL      string
+	paymentURL    string
+	verifyURL     string
+	reverseURL    string
+	reverseURLSet bool // set by WithReverseURL; WithEndpoints then keeps reverseURL
+	client        *http.Client
 }
 
 type Option func(*Gateway)
@@ -39,6 +41,11 @@ func WithHTTPClient(c *http.Client) Option {
 // Pass an empty string to keep the current value.
 func WithEndpoints(tokenURL, paymentURL, verifyURL string) Option {
 	return func(g *Gateway) {
+		// Endpoints overridden for a mock or staging server must not leave
+		// refunds pointed at production: without WithReverseURL, Refund refuses.
+		if !g.reverseURLSet {
+			g.reverseURL = ""
+		}
 		if tokenURL != "" {
 			g.tokenURL = tokenURL
 		}
@@ -53,7 +60,7 @@ func WithEndpoints(tokenURL, paymentURL, verifyURL string) Option {
 
 // WithReverseURL overrides the reverse (refund) endpoint.
 func WithReverseURL(reverseURL string) Option {
-	return func(g *Gateway) { g.reverseURL = reverseURL }
+	return func(g *Gateway) { g.reverseURL, g.reverseURLSet = reverseURL, true }
 }
 
 func New(terminalID string, opts ...Option) *Gateway {
@@ -103,10 +110,10 @@ type tokenRequest struct {
 }
 
 type tokenResponse struct {
-	Status    int    `json:"status"`
-	Token     string `json:"token"`
-	ErrorCode int    `json:"errorCode"`
-	ErrorDesc string `json:"errorDesc"`
+	Status    int             `json:"status"`
+	Token     string          `json:"token"`
+	ErrorCode flexjson.String `json:"errorCode"` // a string in Parbad's model; accept either
+	ErrorDesc string          `json:"errorDesc"`
 }
 
 // CallbackOrderID returns the ResNum (the merchant order ID) Saman echoes back.
@@ -130,8 +137,7 @@ func (g *Gateway) Request(ctx context.Context, p *payjet.Payment) (*payjet.Reque
 		return nil, payjet.Fault("saman", "request", "gateway call failed", err)
 	}
 	if result.Status != 1 || result.Token == "" {
-		return nil, payjet.Rejected("saman", "request",
-			strconv.Itoa(result.ErrorCode), result.ErrorDesc)
+		return nil, payjet.Rejected("saman", "request", string(result.ErrorCode), result.ErrorDesc)
 	}
 	return &payjet.RequestResult{
 		Token:      result.Token,
@@ -141,6 +147,10 @@ func (g *Gateway) Request(ctx context.Context, p *payjet.Payment) (*payjet.Reque
 		Params: map[string]string{"Token": result.Token, "GetMethod": "false"},
 	}, nil
 }
+
+// codeDuplicateVerify is VerifyTransaction's "duplicate request": the
+// transaction was verified before.
+const codeDuplicateVerify = 2
 
 type verifyRequest struct {
 	RefNum         string `json:"RefNum"`
@@ -160,6 +170,9 @@ type verifyResponse struct {
 }
 
 func (g *Gateway) Verify(ctx context.Context, p *payjet.Payment, params map[string]string) (*payjet.VerifyResult, error) {
+	if p == nil {
+		return nil, payjet.Invalid("saman", "verify", "payment is nil")
+	}
 	// Status "2" = successful payment
 	status := payjet.Param(params, "Status")
 	if status != "2" {
@@ -179,7 +192,13 @@ func (g *Gateway) Verify(ctx context.Context, p *payjet.Payment, params map[stri
 	}, &result); err != nil {
 		return nil, payjet.Fault("saman", "verify", "gateway call failed", err)
 	}
-	if result.ResultCode != 0 {
+	switch result.ResultCode {
+	case 0:
+	case codeDuplicateVerify:
+		// Verified before — typically a retry after the first reply was lost.
+		// The checks below still tie the transaction to this order; if the
+		// reply carries no details they fail as a fault, leaving it retryable.
+	default:
 		return nil, payjet.Rejected("saman", "verify",
 			strconv.Itoa(result.ResultCode), result.ResultDescription)
 	}
@@ -192,11 +211,12 @@ func (g *Gateway) Verify(ctx context.Context, p *payjet.Payment, params map[stri
 		return nil, payjet.Mismatch("saman", "verify", payjet.ErrAmountMismatch)
 	}
 	return &payjet.VerifyResult{
-		RefID:      result.TransactionDetail.Rrn,
-		CardNumber: result.TransactionDetail.MaskedPan,
-		OrderID:    p.OrderID,
-		Amount:     result.TransactionDetail.AffectiveAmount,
-		RawParams:  params,
+		RefID:           detail.Rrn,
+		CardNumber:      detail.MaskedPan,
+		OrderID:         p.OrderID,
+		Amount:          detail.AffectiveAmount,
+		RawParams:       params,
+		AlreadyVerified: result.ResultCode == codeDuplicateVerify,
 	}, nil
 }
 
@@ -210,6 +230,13 @@ type reverseResponse struct {
 // Refund reverses the whole payment. It needs the RefNum of the verified
 // callback, read from v.RawParams.
 func (g *Gateway) Refund(ctx context.Context, p *payjet.Payment, v *payjet.VerifyResult) (*payjet.RefundResult, error) {
+	if p == nil {
+		return nil, payjet.Invalid("saman", "refund", "payment is nil")
+	}
+	if g.reverseURL == "" {
+		return nil, payjet.Invalid("saman", "refund",
+			"no refund endpoint: WithEndpoints overrides the defaults, so set WithReverseURL too")
+	}
 	var refNum string
 	if v != nil {
 		refNum = payjet.Param(v.RawParams, "RefNum")

@@ -314,3 +314,33 @@ func TestRefund_RequiresToken(t *testing.T) {
 
 	assert.True(t, errorx.IsBadRequestError(err))
 }
+
+// A refused login during verify is not a verdict on the payment.
+func TestVerify_AuthFailureIsFault(t *testing.T) {
+	gw := newGateway(t, &pasargadMock{tokenCode: 401, tokenMsg: "invalid credentials"})
+
+	_, err := gw.Verify(context.Background(), withToken("u"), map[string]string{
+		"status": "success", "invoiceId": testPayment.OrderID,
+	})
+
+	require.Error(t, err)
+	assert.True(t, errorx.IsInternalError(err))
+	assert.Contains(t, err.Error(), "invalid credentials")
+}
+
+func TestRefund_AuthFailureIsFault(t *testing.T) {
+	gw := newGateway(t, &pasargadMock{tokenCode: 401, tokenMsg: "invalid credentials"})
+
+	_, err := gw.Refund(context.Background(), withToken("u"), nil)
+
+	assert.True(t, errorx.IsInternalError(err))
+}
+
+func TestRequest_SuccessWithoutUrlIdIsFault(t *testing.T) {
+	gw := newGateway(t, &pasargadMock{tokenCode: 0, tokenValue: "tok", purchaseCode: 0})
+
+	_, err := gw.Request(context.Background(), testPayment)
+
+	require.Error(t, err)
+	assert.True(t, errorx.IsInternalError(err))
+}

@@ -15,13 +15,14 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"html"
+	"math/big"
 	"net/http"
 	"net/url"
 	"strconv"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/hatami57/microjet/core/configx"
@@ -182,8 +183,12 @@ func registerRoutes(cfg *payjetConfig) host.HandlerFunc {
 func checkoutHandler(app *host.App, gw payjet.Gateway, ps payjet.PaymentStore, gateway, baseURL string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ctx := c.Request.Context()
-		// Numeric, because Mellat and Parsian accept only numeric order IDs.
-		orderID := strconv.FormatInt(time.Now().UnixMilli(), 10)
+		orderID, err := newOrderID()
+		if err != nil {
+			app.Logger.Error("generate order ID failed", "error", err)
+			c.Redirect(http.StatusFound, "/payment/result?status=error&msg=internal+error")
+			return
+		}
 
 		p := &payjet.Payment{
 			OrderID:     orderID,
@@ -249,9 +254,17 @@ func callbackHandler(app *host.App, gw payjet.Gateway, ps payjet.PaymentStore, t
 			c.Redirect(http.StatusFound, "/payment/result?status=error&msg=order+not+found")
 			return
 		}
-		// Only a pending payment is verified. A replayed callback for a paid
-		// order must not fulfil it twice, and a forged decline must not fail it.
-		if rec.Status != payjet.StatusPending {
+		// Claim the payment before verifying it. The conditional update lets
+		// exactly one of several concurrent callbacks (the bank's POST and a
+		// browser refresh, say) through; a replay for a paid order fails here.
+		// A crash mid-verify leaves the order "processing": re-verify those.
+		claimed, err := ps.TransitionStatus(ctx, rec.OrderID, payjet.StatusPending, payjet.StatusProcessing)
+		if err != nil {
+			app.Logger.Error("claim payment failed", "orderID", rec.OrderID, "error", err)
+			c.Redirect(http.StatusFound, "/payment/result?status=error&msg=internal+error")
+			return
+		}
+		if !claimed {
 			c.Redirect(http.StatusFound, "/payment/result?status=error&msg=payment+already+processed")
 			return
 		}
@@ -260,29 +273,34 @@ func callbackHandler(app *host.App, gw payjet.Gateway, ps payjet.PaymentStore, t
 		// a callback that belongs to a different payment.
 		result, err := gw.Verify(ctx, rec.Payment(), params)
 		if err != nil {
-			// A user cancelling is a normal flow, not a system failure.
+			// A failed verify never fails the order: callbacks are not
+			// authenticated, so anyone can send one for someone else's order —
+			// a claimed decline, another payment's token, or (where nothing in
+			// the callback is secret, as with Saman's RefNum or Pasargad) data
+			// the bank itself refuses before the real customer has paid. Only a
+			// successful verify changes the order; put it back to pending so
+			// the real callback can still verify it. An unpaid pending order is
+			// harmless — expire stale ones in a background job once the bank's
+			// payment window has passed.
 			if errors.Is(err, payjet.ErrCancelled) {
-				_ = ps.SetStatus(ctx, rec.OrderID, payjet.StatusFailed)
-				c.Redirect(http.StatusFound, "/payment/result?status=failed")
-				return
+				app.Logger.Info("payment not completed", "orderID", rec.OrderID, "error", err)
+			} else {
+				app.Logger.Warn("verify failed", "orderID", rec.OrderID, "error", err)
 			}
-			app.Logger.Error("verify failed", "orderID", rec.OrderID, "error", err)
-			// An internal fault (a timeout, an unreadable response) says nothing
-			// about the payment: the bank may have taken the money. Leave it
-			// pending so it can be verified again rather than marking it failed.
-			if !errorx.IsInternalError(err) {
-				_ = ps.SetStatus(ctx, rec.OrderID, payjet.StatusFailed)
-			}
+			release(ctx, app, ps, rec.OrderID, payjet.StatusPending)
 			c.Redirect(http.StatusFound, "/payment/result?status=failed")
 			return
 		}
 
 		// Mark the order succeeded and append the verified transaction.
-		if err := ps.SetStatus(ctx, rec.OrderID, payjet.StatusSucceeded); err != nil {
-			app.Logger.Error("update payment failed", "orderID", rec.OrderID, "error", err)
-		}
+		release(ctx, app, ps, rec.OrderID, payjet.StatusSucceeded)
 		if err := ts.SaveTransaction(ctx, payjet.NewTransaction(gateway, result)); err != nil {
 			app.Logger.Error("save transaction failed", "orderID", rec.OrderID, "error", err)
+		}
+		if result.AlreadyVerified {
+			// Genuine, but verified before: an earlier attempt verified it and
+			// then failed to record it. This claim is the first to record it.
+			app.Logger.Warn("payment was already verified", "orderID", rec.OrderID)
 		}
 
 		app.Logger.Info("payment succeeded",
@@ -290,6 +308,26 @@ func callbackHandler(app *host.App, gw payjet.Gateway, ps payjet.PaymentStore, t
 		c.Redirect(http.StatusFound,
 			"/payment/result?status=success&ref="+url.QueryEscape(result.RefID))
 	}
+}
+
+// release moves a claimed (processing) payment to its outcome.
+func release(ctx context.Context, app *host.App, ps payjet.PaymentStore, orderID string, to payjet.PaymentStatus) {
+	ok, err := ps.TransitionStatus(ctx, orderID, payjet.StatusProcessing, to)
+	if err != nil || !ok {
+		app.Logger.Error("release payment failed", "orderID", orderID, "to", to, "error", err)
+	}
+}
+
+// newOrderID returns a random 15-digit order ID. It is numeric because Mellat
+// and Parsian accept only numeric order IDs, and random rather than a
+// timestamp so nobody can guess another customer's order and send a callback
+// for it.
+func newOrderID() (string, error) {
+	n, err := rand.Int(rand.Reader, big.NewInt(9e14))
+	if err != nil {
+		return "", err
+	}
+	return strconv.FormatInt(n.Int64()+1e14, 10), nil
 }
 
 // ── main ─────────────────────────────────────────────────────────────────────

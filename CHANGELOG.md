@@ -4,6 +4,77 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+A second full review. The main theme: several outcomes that say nothing about a
+payment were reported as rejections, and callbacks — which anyone can send —
+could fail or double-fulfil orders in the webshop example.
+
+**Upgrading:** custom `PaymentStore` implementations must add
+`TransitionStatus` (see **Added**).
+
+### Security
+
+- **Webshop example: a forged callback could fail someone else's order.** Any
+  verify error other than a fault marked the order failed, including a claimed
+  decline, another payment's token, and — where the callback carries nothing
+  secret (Saman's `RefNum`, Pasargad) — the bank refusing forged data before the
+  real customer had paid. With guessable timestamp order IDs, a stranger could
+  fail an order whose customer then paid. A failed verify now never changes the
+  order; only a successful one does. Order IDs are random 15-digit numbers.
+- **Webshop example: concurrent callbacks could both verify.** The pending
+  check and the update were separate, so the bank's POST and a browser refresh
+  could both verify one order and record it twice. The handler now claims the
+  order with `TransitionStatus` (pending → processing) and verifies only if the
+  claim succeeded.
+
+### Fixed
+
+- **Parsian: an unreadable confirm reply looked like a rejection.** `soap.Post`
+  ignored `io.ReadAll` errors, so a confirmation cut off mid-body — or any 200
+  reply that is not a ConfirmPayment response — parsed with no `Status` and
+  came back as `Rejected`. A read error is now a fault, and so is a reply with
+  no `Status` (in request, verify and refund).
+- **Mellat: a failed settle after a successful verify looked like a decline.**
+  It is now a fault carrying the bank's rejection as its cause; verifying again
+  (code 43) retries the settle. A reply with no `<return>` value is a fault
+  rather than a rejection with an empty code.
+- **Pasargad: a refused login during verify or refund looked like a
+  rejection.** It is now a fault. `Request` treats a success reply without a
+  `UrlId` or payment URL as a fault instead of redirecting nowhere.
+- **Saman: a duplicate verify (code 2) was a rejection.** A retry after a lost
+  reply failed a paid order. It is now `AlreadyVerified`, still subject to the
+  terminal, `RefNum` and amount checks. The token reply's `errorCode` accepts a
+  string, as Parbad models it, as well as a number.
+- **`WithEndpoints` left refunds pointed at production** in Zarinpal, Saman and
+  Parsian. Overriding the endpoints now clears the default refund endpoint
+  unless one was set explicitly, and `Refund` then returns a BadRequest error.
+- **Parsian** checks that the order ID is numeric before the request, as PEC's
+  `OrderId` is a number.
+- **A nil `Payment`** makes `Verify` and `Refund` return a BadRequest error in
+  every gateway instead of panicking.
+- **SOAP error bodies** are cut at a UTF-8 boundary, so Persian error pages stay
+  valid text in the logs.
+- **Default store:** `SetStatus` returns a NotFound error for an unknown order
+  instead of succeeding silently.
+- **Virtual gateway:** requested and paid payments are forgotten after a
+  retention window (`WithRetention`, 24 hours by default), and a double-
+  submitted payment page is refused instead of issuing two codes.
+- **README quick start:** it indexed the payment under an empty token when the
+  gateway returned none, and did not guard against replayed or concurrent
+  callbacks. It now claims the order before verifying, as the webshop does.
+- **Storage example:** `ListTransactions` returned oldest first; the interface
+  promises newest first.
+
+### Added
+
+- `PaymentStore.TransitionStatus(ctx, orderID, from, to) (bool, error)`: an
+  atomic compare-and-set of a payment's status, and `StatusProcessing` for a
+  payment claimed for verification. The default store implements it with one
+  conditional `UPDATE`.
+- `virtual.WithRetention` and `virtual.DefaultRetention`.
+- A README section on handling callbacks safely.
+
 ## [0.10.0] - 2026-09-25
 
 ### Added

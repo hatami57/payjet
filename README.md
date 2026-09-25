@@ -56,10 +56,16 @@ import (
     "github.com/majid/payjet/zarinpal"
 )
 
+// order is a payment and where it stands: "pending", "processing" or "paid".
+type order struct {
+    p     *payjet.Payment
+    state string
+}
+
 // Replace this in-memory store with your database.
 var (
     mu    sync.Mutex
-    store = map[string]*payjet.Payment{}
+    store = map[string]*order{}
 )
 
 func main() {
@@ -68,9 +74,9 @@ func main() {
     http.HandleFunc("/checkout", func(w http.ResponseWriter, r *http.Request) {
         p := &payjet.Payment{
             Amount:      500_000, // Rials
-            OrderID:     "order-123",
+            OrderID:     "100123", // unique and hard to guess in a real shop
             CallbackURL: "https://myshop.ir/payment/callback",
-            Description: "Order #123",
+            Description: "Order #100123",
         }
 
         res, err := gw.Request(r.Context(), p)
@@ -80,12 +86,15 @@ func main() {
         }
 
         // Keep the gateway token with the payment: Verify checks the callback
-        // against it. Persist the payment keyed by both OrderID and token, so it
-        // can be found again in the callback regardless of which the gateway echoes.
+        // against it. Index the order by OrderID and token, so the callback
+        // finds it whichever of the two the gateway echoes.
         p.Token = res.Token
+        o := &order{p: p, state: "pending"}
         mu.Lock()
-        store[p.OrderID] = p
-        store[res.Token] = p
+        store[p.OrderID] = o
+        if res.Token != "" {
+            store[res.Token] = o
+        }
         mu.Unlock()
 
         // One call handles GET redirects and POST self-submitting forms.
@@ -93,30 +102,42 @@ func main() {
     })
 
     http.HandleFunc("/payment/callback", func(w http.ResponseWriter, r *http.Request) {
-        params := payjet.ParseCallback(r)          // merges query + form fields
-        key := gw.CallbackOrderID(params)          // gateway knows its own ID field
+        params := payjet.ParseCallback(r) // merges query + form fields
+        key := gw.CallbackOrderID(params) // gateway knows its own ID field
 
+        // Claim the order: only a pending one is verified, and only by one
+        // callback at a time. A replay of a paid order's callback stops here.
         mu.Lock()
-        p, ok := store[key]
+        o := store[key]
+        claimed := key != "" && o != nil && o.state == "pending"
+        if claimed {
+            o.state = "processing"
+        }
         mu.Unlock()
-        if !ok {
-            http.Error(w, "unknown payment", http.StatusBadRequest)
+        if !claimed {
+            http.Error(w, "unknown or already processed payment", http.StatusBadRequest)
             return
         }
 
-        result, err := gw.Verify(r.Context(), p, params)
+        result, err := gw.Verify(r.Context(), o.p, params)
+
+        mu.Lock()
         if err != nil {
-            if errors.Is(err, payjet.ErrCancelled) {
-                http.Redirect(w, r, "/payment/failed", http.StatusFound)
-                return
+            // Never fail the order on a failed verify: anyone can send a
+            // callback for it. Leave it pending for the real one.
+            o.state = "pending"
+        } else {
+            o.state = "paid"
+        }
+        mu.Unlock()
+
+        if err != nil {
+            if !errors.Is(err, payjet.ErrCancelled) {
+                log.Printf("verify error for %s: %v", o.p.OrderID, err)
             }
-            log.Printf("verify error for %s: %v", p.OrderID, err)
             http.Redirect(w, r, "/payment/failed", http.StatusFound)
             return
         }
-
-        // A real app also records that the order is paid and ignores later
-        // callbacks for it; result.AlreadyVerified flags a repeat verification.
         log.Printf("paid: order=%s ref=%s card=%s", result.OrderID, result.RefID, result.CardNumber)
         http.Redirect(w, r, "/payment/success", http.StatusFound)
     })
@@ -325,6 +346,29 @@ Banks are also inconsistent about the casing of callback fields (Parsian posts
 `Token` and `OrderId`), so gateways match field names case-insensitively. Use
 `payjet.Param(params, name)` to read a callback field the same way.
 
+## Handling callbacks safely
+
+A callback is an unauthenticated request: anyone can send one, for any order.
+Three rules keep that harmless, and both the quick start and the
+[webshop example](./examples/webshop) follow them:
+
+1. **Claim the order before verifying it.** Move it atomically from pending to
+   processing (`PaymentStore.TransitionStatus`) and verify only if that
+   succeeded. The bank's POST and a browser refresh often arrive together;
+   without the claim both verify and the order is fulfilled twice.
+2. **Only a successful verify changes the order.** On any error, put it back to
+   pending. A claimed decline can be forged, a mismatch means the callback is
+   another payment's, and where nothing in the callback is secret (Saman's
+   `RefNum`, Pasargad) forged data makes the bank itself refuse to verify before
+   the real customer has paid. An unpaid pending order is harmless; expire stale
+   ones in a background job once the bank's payment window has passed.
+3. **Make order IDs hard to guess**, so a stranger cannot target an order at
+   all.
+
+Errors from `Verify` that are faults (`errorx.IsInternalError`) — a timeout, an
+unreadable reply, a settle or login failure after the payment went through —
+say nothing about the payment. Leave the order pending and verify again.
+
 ## Configuration options
 
 Every gateway accepts functional options:
@@ -339,6 +383,10 @@ gw := saman.New(id, saman.WithEndpoints(t, p, v))     // override URLs (testing)
 
 The refund endpoints have their own options: `zarinpal.WithRefundURL`,
 `parsian.WithRefundURL`, `saman.WithReverseURL` and `pasargad.WithReversePath`.
+Overriding a gateway's endpoints with `WithEndpoints` clears its default
+(production) refund endpoint, so pointing a gateway at a mock or staging server
+can never send refunds to production: set the refund option too, or `Refund`
+returns a BadRequest error.
 
 Mellat and Pasargad take a config struct for their credentials:
 
@@ -390,6 +438,7 @@ type PaymentStore interface {
     GetPayment(ctx context.Context, orderID string) (*StoredPayment, error)
     GetPaymentByToken(ctx context.Context, token string) (*StoredPayment, error)
     SetStatus(ctx context.Context, orderID string, status PaymentStatus) error
+    TransitionStatus(ctx context.Context, orderID string, from, to PaymentStatus) (bool, error)
 }
 
 type TransactionStore interface {
@@ -398,6 +447,13 @@ type TransactionStore interface {
     ListTransactions(ctx context.Context, orderID string) ([]*Transaction, error)
 }
 ```
+
+`TransitionStatus` moves a payment from one status to another only if it is
+still in the first, atomically, and reports whether it did; implement it with a
+conditional update (`UPDATE ... WHERE order_id = ? AND status = ?`) or under the
+same lock that guards your reads. `SetStatus` returns a NotFound error for an
+unknown order. Statuses are `StatusPending`, `StatusProcessing` (claimed for
+verification), `StatusSucceeded`, `StatusFailed` and `StatusRefunded`.
 
 `StoredPayment` is the order/intent (keyed by `OrderID`, indexed by gateway
 `Token` for token-only callbacks like Zarinpal); `Transaction` is the persisted

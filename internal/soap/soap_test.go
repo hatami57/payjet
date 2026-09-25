@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/hatami57/microjet/core/errorx"
 )
@@ -91,5 +92,27 @@ func TestPostTruncatesLargeErrorBody(t *testing.T) {
 	}
 	if body, _ := ce.Params["body"].(string); len(body) > maxBodyParam+len("…") {
 		t.Errorf("body length = %d, want at most %d", len(body), maxBodyParam+len("…"))
+	}
+}
+
+func TestPostTruncatedBodyIsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "10000")
+		_, _ = w.Write([]byte(`<Envelope><Body>`))
+	}))
+	defer srv.Close()
+
+	_, err := Post(context.Background(), srv.Client(), srv.URL, "X", `<x/>`)
+	if !errorx.IsInternalError(err) {
+		t.Fatalf("err = %v, want an Internal error", err)
+	}
+}
+
+func TestTruncateKeepsUTF8Valid(t *testing.T) {
+	s := strings.Repeat("خطا", 10) // 2-byte runes
+	for n := 1; n < len(s); n++ {
+		if got := truncate(s, n); !utf8.ValidString(got) {
+			t.Fatalf("truncate(%d) = %q is not valid UTF-8", n, got)
+		}
 	}
 }

@@ -116,7 +116,13 @@ func (g *Gateway) call(ctx context.Context, action, innerXML string) (string, er
 	if err := xml.Unmarshal(data, &env); err != nil {
 		return "", fmt.Errorf("parsing SOAP response: %w", err)
 	}
-	return strings.TrimSpace(env.Body.Response.Return), nil
+	ret := strings.TrimSpace(env.Body.Response.Return)
+	if ret == "" {
+		// Every Mellat operation returns a code; an empty one means the reply
+		// was not the response we asked for, not a rejection.
+		return "", fmt.Errorf("SOAP response has no return value")
+	}
+	return ret, nil
 }
 
 var _ payjet.Refunder = (*Gateway)(nil)
@@ -180,6 +186,9 @@ func (g *Gateway) Request(ctx context.Context, p *payjet.Payment) (*payjet.Reque
 // Verify verifies and settles the payment. When p.Token is set it must match the
 // callback's RefId.
 func (g *Gateway) Verify(ctx context.Context, p *payjet.Payment, params map[string]string) (*payjet.VerifyResult, error) {
+	if p == nil {
+		return nil, payjet.Invalid("mellat", "verify", "payment is nil")
+	}
 	resCode := payjet.Param(params, "ResCode")
 	if resCode != "0" {
 		return nil, payjet.Declined("mellat", "verify", resCode, "")
@@ -271,7 +280,12 @@ func (g *Gateway) settle(ctx context.Context, orderID, saleOrderID, saleRefID in
 		return payjet.Fault("mellat", "settle", "bpSettleRequest call failed", err)
 	}
 	if code != "0" && code != "45" { // 45 = already settled
-		return payjet.Rejected("mellat", "settle", code, "")
+		// Settle runs only after a successful verify, so the payment is genuine
+		// and verifying again (code 43) retries the settle. Report a fault, not
+		// a rejection, so callers retry instead of failing a paid order.
+		return payjet.Fault("mellat", "settle",
+			"settle failed after a successful verify; verify again to retry it",
+			payjet.Rejected("mellat", "settle", code, ""))
 	}
 	return nil
 }
@@ -279,6 +293,9 @@ func (g *Gateway) settle(ctx context.Context, orderID, saleOrderID, saleRefID in
 // Refund reverses the whole payment with bpReversalRequest. It needs the
 // SaleReferenceId Verify returned as v.RefID.
 func (g *Gateway) Refund(ctx context.Context, p *payjet.Payment, v *payjet.VerifyResult) (*payjet.RefundResult, error) {
+	if p == nil {
+		return nil, payjet.Invalid("mellat", "refund", "payment is nil")
+	}
 	orderID, err := strconv.ParseInt(p.OrderID, 10, 64)
 	if err != nil {
 		return nil, payjet.Invalid("mellat", "refund",

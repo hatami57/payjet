@@ -165,6 +165,9 @@ func (g *Gateway) Request(ctx context.Context, p *payjet.Payment) (*payjet.Reque
 // Verify confirms the payment. The callback's order_id and amount must match p,
 // and when p.Token is set it must match the callback's id.
 func (g *Gateway) Verify(ctx context.Context, p *payjet.Payment, params map[string]string) (*payjet.VerifyResult, error) {
+	if p == nil {
+		return nil, payjet.Invalid("idpay", "verify", "payment is nil")
+	}
 	status := payjet.Param(params, "status")
 	if status != callbackReadyStatus {
 		return nil, payjet.Declined("idpay", "verify", status, "payment not ready for verify")

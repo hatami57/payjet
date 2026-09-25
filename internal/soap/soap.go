@@ -17,6 +17,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/hatami57/microjet/core/errorx"
 )
@@ -48,7 +49,13 @@ func Post(ctx context.Context, httpClient *http.Client, url, action, envelope st
 	}
 	defer resp.Body.Close()
 
-	data, _ := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		// A body cut off mid-read must not be parsed as a complete reply: the
+		// bank may have confirmed a payment whose confirmation never arrived.
+		return nil, errorx.NewInternalError("soap", "reading response failed").
+			WithParams("url", url, "status", resp.StatusCode).WithInner(err)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, errorx.NewInternalError("soap", fmt.Sprintf("upstream returned %d", resp.StatusCode)).
 			WithParams("status", resp.StatusCode, "body", truncate(string(data), maxBodyParam))
@@ -60,9 +67,14 @@ func Post(ctx context.Context, httpClient *http.Client, url, action, envelope st
 	return data, nil
 }
 
+// truncate cuts s to at most n bytes without splitting a UTF-8 sequence, so a
+// Persian error page stays valid text in the logs.
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
 	}
 	return s[:n] + "…"
 }

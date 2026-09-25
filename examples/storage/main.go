@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/hatami57/microjet/core/errorx"
 	"github.com/majid/payjet"
 )
 
@@ -62,10 +63,25 @@ func (s *memStore) GetPaymentByToken(_ context.Context, token string) (*payjet.S
 func (s *memStore) SetStatus(_ context.Context, orderID string, status payjet.PaymentStatus) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if p := s.byOrder[orderID]; p != nil {
-		p.Status = status
+	p := s.byOrder[orderID]
+	if p == nil {
+		return errorx.NewNotFoundError("payment", "no payment with this order ID")
 	}
+	p.Status = status
 	return nil
+}
+
+// TransitionStatus checks and sets the status under one lock, which is what
+// makes it atomic; a SQL store does the same with a conditional UPDATE.
+func (s *memStore) TransitionStatus(_ context.Context, orderID string, from, to payjet.PaymentStatus) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p := s.byOrder[orderID]
+	if p == nil || p.Status != from {
+		return false, nil
+	}
+	p.Status = to
+	return true, nil
 }
 
 func (s *memStore) SaveTransaction(_ context.Context, t *payjet.Transaction) error {
@@ -89,7 +105,12 @@ func (s *memStore) GetTransaction(_ context.Context, orderID string) (*payjet.Tr
 func (s *memStore) ListTransactions(_ context.Context, orderID string) ([]*payjet.Transaction, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.txs[orderID], nil
+	list := s.txs[orderID]
+	out := make([]*payjet.Transaction, len(list))
+	for i, t := range list {
+		out[len(list)-1-i] = t // newest first, as the interface requires
+	}
+	return out, nil
 }
 
 // Compile-time proof the backend satisfies both store interfaces.

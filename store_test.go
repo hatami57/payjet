@@ -3,8 +3,11 @@ package payjet
 import (
 	"context"
 	"log/slog"
+	"sync"
+	"sync/atomic"
 	"testing"
 
+	"github.com/hatami57/microjet/core/errorx"
 	"github.com/hatami57/microjet/gormx"
 	"github.com/hatami57/microjet/gormx/sqlite"
 	"github.com/stretchr/testify/assert"
@@ -178,4 +181,78 @@ func TestTransaction_VerifyResultRoundTrip(t *testing.T) {
 	got := NewTransaction("saman", vr).VerifyResult()
 
 	assert.Equal(t, vr, got)
+}
+
+func TestPaymentStore_SetStatusUnknownOrder(t *testing.T) {
+	ps, _ := newTestStores(t)
+
+	err := ps.SetStatus(context.Background(), "no-such-order", StatusSucceeded)
+
+	assert.True(t, errorx.IsNotFoundError(err))
+}
+
+func TestPaymentStore_SetStatusUnchangedIsNotAnError(t *testing.T) {
+	ctx := context.Background()
+	ps, _ := newTestStores(t)
+	require.NoError(t, ps.SavePayment(ctx, NewStoredPayment("zarinpal", &Payment{
+		OrderID: "o-1", Amount: 1000, CallbackURL: "https://x/cb",
+	})))
+
+	require.NoError(t, ps.SetStatus(ctx, "o-1", StatusPending))
+}
+
+func TestPaymentStore_TransitionStatus(t *testing.T) {
+	ctx := context.Background()
+	ps, _ := newTestStores(t)
+	require.NoError(t, ps.SavePayment(ctx, NewStoredPayment("zarinpal", &Payment{
+		OrderID: "o-1", Amount: 1000, CallbackURL: "https://x/cb",
+	})))
+
+	ok, err := ps.TransitionStatus(ctx, "o-1", StatusPending, StatusProcessing)
+	require.NoError(t, err)
+	assert.True(t, ok)
+
+	ok, err = ps.TransitionStatus(ctx, "o-1", StatusPending, StatusProcessing)
+	require.NoError(t, err)
+	assert.False(t, ok, "a payment no longer pending cannot be claimed again")
+
+	ok, err = ps.TransitionStatus(ctx, "missing", StatusPending, StatusProcessing)
+	require.NoError(t, err)
+	assert.False(t, ok)
+
+	got, err := ps.GetPayment(ctx, "o-1")
+	require.NoError(t, err)
+	assert.Equal(t, StatusProcessing, got.Status)
+}
+
+// Concurrent callbacks for one payment: exactly one may claim it.
+func TestPaymentStore_TransitionStatusConcurrent(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	// One connection, so the in-memory database is shared by every goroutine.
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	sqlDB.SetMaxOpenConns(1)
+	require.NoError(t, db.AutoMigrate(&StoredPayment{}))
+	ps := &dbPaymentStore{}
+	ps.initDB(db)
+	require.NoError(t, ps.SavePayment(ctx, NewStoredPayment("zarinpal", &Payment{
+		OrderID: "o-1", Amount: 1000, CallbackURL: "https://x/cb",
+	})))
+
+	var wins atomic.Int32
+	var wg sync.WaitGroup
+	for range 20 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ok, err := ps.TransitionStatus(ctx, "o-1", StatusPending, StatusProcessing)
+			assert.NoError(t, err)
+			if ok {
+				wins.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	assert.Equal(t, int32(1), wins.Load())
 }

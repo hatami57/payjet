@@ -29,6 +29,7 @@ type Gateway struct {
 	requestURL   string
 	verifyURL    string
 	refundURL    string
+	refundURLSet bool // set by WithRefundURL; WithEndpoints then keeps refundURL
 	paymentURL   string
 	client       *http.Client
 }
@@ -44,6 +45,11 @@ func WithHTTPClient(c *http.Client) Option {
 // Pass an empty string to keep the current value.
 func WithEndpoints(requestURL, verifyURL, paymentURL string) Option {
 	return func(g *Gateway) {
+		// Endpoints overridden for a mock or staging server must not leave
+		// refunds pointed at production: without WithRefundURL, Refund refuses.
+		if !g.refundURLSet {
+			g.refundURL = ""
+		}
 		if requestURL != "" {
 			g.requestURL = requestURL
 		}
@@ -58,7 +64,7 @@ func WithEndpoints(requestURL, verifyURL, paymentURL string) Option {
 
 // WithRefundURL overrides the reversal (refund) endpoint.
 func WithRefundURL(refundURL string) Option {
-	return func(g *Gateway) { g.refundURL = refundURL }
+	return func(g *Gateway) { g.refundURL, g.refundURLSet = refundURL, true }
 }
 
 func New(loginAccount string, opts ...Option) *Gateway {
@@ -123,6 +129,11 @@ func (g *Gateway) Request(ctx context.Context, p *payjet.Payment) (*payjet.Reque
 	if err := p.Validate(); err != nil {
 		return nil, err
 	}
+	// PEC's OrderId is a long; reject anything else before the round trip.
+	if _, err := strconv.ParseInt(p.OrderID, 10, 64); err != nil {
+		return nil, payjet.Invalid("parsian", "request",
+			fmt.Sprintf("OrderID must be numeric, got %q", p.OrderID))
+	}
 	envelope := fmt.Sprintf(
 		`<?xml version="1.0" encoding="UTF-8"?>`+
 			`<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:sal="%s">`+
@@ -150,6 +161,9 @@ func (g *Gateway) Request(ctx context.Context, p *payjet.Payment) (*payjet.Reque
 	token := xmlNodeValue(raw, "Token", requestNS)
 	message := xmlNodeValue(raw, "Message", requestNS)
 
+	if status == "" {
+		return nil, payjet.Fault("parsian", "request", "no Status in SalePaymentRequest response", nil)
+	}
 	if status != "0" || token == "" {
 		return nil, payjet.Rejected("parsian", "request", status, message)
 	}
@@ -165,6 +179,9 @@ func (g *Gateway) Request(ctx context.Context, p *payjet.Payment) (*payjet.Reque
 // amount or order, so without this check a callback carrying the token of a
 // cheaper paid order would confirm that payment against p.
 func (g *Gateway) Verify(ctx context.Context, p *payjet.Payment, params map[string]string) (*payjet.VerifyResult, error) {
+	if p == nil {
+		return nil, payjet.Invalid("parsian", "verify", "payment is nil")
+	}
 	status := payjet.Param(params, "status")
 	if status != "0" {
 		return nil, payjet.Declined("parsian", "verify", status, "")
@@ -207,6 +224,12 @@ func (g *Gateway) Verify(ctx context.Context, p *payjet.Payment, params map[stri
 	confirmStatus := xmlNodeValue(raw, "Status", verifyNS)
 	rrn := xmlNodeValue(raw, "RRN", verifyNS)
 
+	// No Status means the reply was not a ConfirmPayment response (an HTML
+	// page, a different envelope): it says nothing about the payment, which
+	// the bank may well have confirmed, so it is a fault rather than a rejection.
+	if confirmStatus == "" {
+		return nil, payjet.Fault("parsian", "verify", "no Status in ConfirmPayment response", nil)
+	}
 	if confirmStatus != "0" || rrn == "" {
 		return nil, payjet.Rejected("parsian", "verify", confirmStatus, "")
 	}
@@ -221,6 +244,13 @@ func (g *Gateway) Verify(ctx context.Context, p *payjet.Payment, params map[stri
 // Refund reverses the whole payment. It needs p.Token, the token Request
 // issued; v is not used.
 func (g *Gateway) Refund(ctx context.Context, p *payjet.Payment, _ *payjet.VerifyResult) (*payjet.RefundResult, error) {
+	if p == nil {
+		return nil, payjet.Invalid("parsian", "refund", "payment is nil")
+	}
+	if g.refundURL == "" {
+		return nil, payjet.Invalid("parsian", "refund",
+			"no refund endpoint: WithEndpoints overrides the defaults, so set WithRefundURL too")
+	}
 	if p.Token == "" {
 		return nil, payjet.Invalid("parsian", "refund", "Payment.Token is required to refund a Parsian payment")
 	}
@@ -241,6 +271,9 @@ func (g *Gateway) Refund(ctx context.Context, p *payjet.Payment, _ *payjet.Verif
 	}
 	raw := string(data)
 	status := xmlNodeValue(raw, "Status", refundNS)
+	if status == "" {
+		return nil, payjet.Fault("parsian", "refund", "no Status in ReversalRequest response", nil)
+	}
 	if status != "0" {
 		return nil, payjet.Rejected("parsian", "refund", status, xmlNodeValue(raw, "Message", refundNS))
 	}

@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/hatami57/microjet/core/errorx"
 	"github.com/hatami57/microjet/gormx"
 	"github.com/hatami57/microjet/host"
 	"gorm.io/gorm"
@@ -61,8 +62,29 @@ func (d *dbPaymentStore) GetPaymentByToken(ctx context.Context, token string) (*
 }
 
 func (d *dbPaymentStore) SetStatus(ctx context.Context, orderID string, status PaymentStatus) error {
-	_, err := d.table.UpdateMap(ctx, map[string]any{"status": status}, "order_id = ?", orderID)
-	return err
+	n, err := d.table.UpdateMap(ctx, map[string]any{"status": status}, "order_id = ?", orderID)
+	if err != nil || n > 0 {
+		return err
+	}
+	// Some databases (MySQL) count only changed rows, so zero rows can also
+	// mean the status was already set; tell that apart from a missing payment.
+	p, err := d.GetPayment(ctx, orderID)
+	if err != nil {
+		return err
+	}
+	if p == nil {
+		return errorx.NewNotFoundError("payment", "no payment with this order ID").
+			WithParams("orderID", orderID)
+	}
+	return nil
+}
+
+func (d *dbPaymentStore) TransitionStatus(ctx context.Context, orderID string, from, to PaymentStatus) (bool, error) {
+	// A single conditional UPDATE: the database serializes concurrent callers,
+	// so exactly one of them sees a row affected.
+	n, err := d.table.UpdateMap(ctx, map[string]any{"status": to},
+		"order_id = ? AND status = ?", orderID, from)
+	return n > 0, err
 }
 
 // ── transactions ──────────────────────────────────────────────────────────────

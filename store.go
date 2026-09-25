@@ -11,6 +11,10 @@ type PaymentStatus string
 const (
 	// StatusPending is a payment that has been initiated but not yet verified.
 	StatusPending PaymentStatus = "pending"
+	// StatusProcessing is a payment whose callback is being verified. Move a
+	// payment here from StatusPending with TransitionStatus before calling
+	// Verify, so a second callback arriving meanwhile cannot verify it too.
+	StatusProcessing PaymentStatus = "processing"
 	// StatusSucceeded is a payment whose Gateway.Verify confirmed it.
 	StatusSucceeded PaymentStatus = "succeeded"
 	// StatusFailed is a payment the gateway declined, the user cancelled, or
@@ -132,8 +136,15 @@ type PaymentStore interface {
 	// nil if none (always nil for an empty token). Use it for gateways whose callback echoes only a token rather
 	// than the merchant OrderID (e.g. Zarinpal).
 	GetPaymentByToken(ctx context.Context, token string) (*StoredPayment, error)
-	// SetStatus updates the status of the payment with the given OrderID.
+	// SetStatus updates the status of the payment with the given OrderID. It
+	// returns a NotFound error when no such payment exists.
 	SetStatus(ctx context.Context, orderID string, status PaymentStatus) error
+	// TransitionStatus atomically moves the payment from status from to status
+	// to, reporting whether it did: false means the payment was not in from
+	// (another request moved it first) or does not exist. Use it to claim a
+	// payment before verifying its callback, so concurrent callbacks for one
+	// payment cannot both verify and fulfil it.
+	TransitionStatus(ctx context.Context, orderID string, from, to PaymentStatus) (bool, error)
 }
 
 // TransactionStore persists verification outcomes. Like PaymentStore it can be

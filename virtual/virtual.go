@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/majid/payjet"
 )
@@ -27,6 +28,7 @@ import (
 // Gateway is the virtual payment gateway.
 type Gateway struct {
 	gatewayURL string
+	retention  time.Duration
 	mu         sync.RWMutex
 	pending    map[string]pendingPayment // token → payment
 	issued     map[string]issuedTx       // transaction code → paid payment
@@ -40,7 +42,12 @@ type issuedTx struct {
 	token    string
 	verified bool
 	refunded bool
+	created  time.Time
 }
+
+// DefaultRetention is how long the gateway remembers a requested or paid
+// payment before forgetting it.
+const DefaultRetention = 24 * time.Hour
 
 var _ payjet.Refunder = (*Gateway)(nil)
 
@@ -49,10 +56,18 @@ type pendingPayment struct {
 	orderID     string
 	amount      int64
 	callbackURL string
+	created     time.Time
 }
 
 // Option configures a Gateway.
 type Option func(*Gateway)
+
+// WithRetention sets how long requested and paid payments are remembered
+// (DefaultRetention by default). Older entries are dropped on the next Request,
+// so a long-running development server does not grow without bound.
+func WithRetention(d time.Duration) Option {
+	return func(g *Gateway) { g.retention = d }
+}
 
 // New creates a virtual gateway. gatewayURL is the full public URL where
 // Handler() is mounted (e.g. "http://localhost:8080/virtual-pay").
@@ -60,6 +75,7 @@ type Option func(*Gateway)
 func New(gatewayURL string, opts ...Option) *Gateway {
 	g := &Gateway{
 		gatewayURL: strings.TrimRight(gatewayURL, "/"),
+		retention:  DefaultRetention,
 		pending:    make(map[string]pendingPayment),
 		issued:     make(map[string]issuedTx),
 	}
@@ -78,12 +94,15 @@ func (g *Gateway) Request(ctx context.Context, p *payjet.Payment) (*payjet.Reque
 		return nil, err
 	}
 	token := newRandHex(16)
+	now := time.Now()
 	g.mu.Lock()
+	g.prune(now)
 	g.pending[token] = pendingPayment{
 		token:       token,
 		orderID:     p.OrderID,
 		amount:      p.Amount,
 		callbackURL: p.CallbackURL,
+		created:     now,
 	}
 	g.mu.Unlock()
 
@@ -110,12 +129,12 @@ func (g *Gateway) CallbackOrderID(params map[string]string) string {
 // Only transaction codes this gateway issued for p's order are accepted; a code
 // verified before returns AlreadyVerified.
 func (g *Gateway) Verify(_ context.Context, p *payjet.Payment, params map[string]string) (*payjet.VerifyResult, error) {
+	if p == nil {
+		return nil, payjet.Invalid("virtual", "verify", "payment is nil")
+	}
 	result := payjet.Param(params, "result")
 	if result != "true" {
 		return nil, payjet.Declined("virtual", "verify", result, "")
-	}
-	if p == nil {
-		return nil, payjet.Invalid("virtual", "verify", "payment is nil")
 	}
 	if payjet.Param(params, "OrderID") != p.OrderID {
 		return nil, payjet.Mismatch("virtual", "verify", payjet.ErrOrderMismatch)
@@ -173,11 +192,27 @@ func (g *Gateway) Refund(_ context.Context, p *payjet.Payment, v *payjet.VerifyR
 	}, nil
 }
 
+// prune drops entries older than the retention window. g.mu must be held.
+func (g *Gateway) prune(now time.Time) {
+	cutoff := now.Add(-g.retention)
+	for t, p := range g.pending {
+		if p.created.Before(cutoff) {
+			delete(g.pending, t)
+		}
+	}
+	for c, tx := range g.issued {
+		if tx.created.Before(cutoff) {
+			delete(g.issued, c)
+		}
+	}
+}
+
 // complete finishes the pending payment for token (or, when token is empty, the
 // one for orderID) and, when paid, issues and records a transaction code for
-// it. It returns the payment's token ("" if it was never requested) and the
-// code ("" when not paid).
-func (g *Gateway) complete(token, orderID string, paid bool) (string, string) {
+// it. It returns the payment's token ("" if it was never requested), the code
+// ("" when not paid), and false when token was given but is no longer pending
+// (the page was already submitted), in which case nothing is issued.
+func (g *Gateway) complete(token, orderID string, paid bool) (string, string, bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if token == "" {
@@ -187,14 +222,16 @@ func (g *Gateway) complete(token, orderID string, paid bool) (string, string) {
 				break
 			}
 		}
+	} else if _, ok := g.pending[token]; !ok {
+		return token, "", false
 	}
 	delete(g.pending, token)
 	if !paid {
-		return token, ""
+		return token, "", true
 	}
 	txCode := newRandHex(12)
-	g.issued[txCode] = issuedTx{orderID: orderID, token: token}
-	return token, txCode
+	g.issued[txCode] = issuedTx{orderID: orderID, token: token, created: time.Now()}
+	return token, txCode, true
 }
 
 // ---- test helpers -----------------------------------------------------------
@@ -208,7 +245,7 @@ func (g *Gateway) complete(token, orderID string, paid bool) (string, string) {
 //	params := gw.SimulatePayment(payment.OrderID, true)
 //	result, _ := gw.Verify(payment, params)
 func (g *Gateway) SimulatePayment(orderID string, succeed bool) map[string]string {
-	token, txCode := g.complete("", orderID, succeed)
+	token, txCode, _ := g.complete("", orderID, succeed)
 	params := map[string]string{
 		"OrderID": orderID,
 		"result":  "false",
@@ -249,7 +286,12 @@ func (g *Gateway) Handler() http.Handler {
 
 		if r.Method == http.MethodPost {
 			isPaid := r.FormValue("pay") == "1"
-			_, txCode := g.complete(token, p.orderID, isPaid)
+			_, txCode, ok := g.complete(token, p.orderID, isPaid)
+			if !ok {
+				// A second submit raced the first past the lookup above.
+				http.Error(w, "virtual gateway: payment already completed", http.StatusConflict)
+				return
+			}
 
 			q := url.Values{}
 			q.Set("OrderID", p.orderID)

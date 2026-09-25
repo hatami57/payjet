@@ -29,12 +29,13 @@ const (
 var _ payjet.Refunder = (*Gateway)(nil)
 
 type Gateway struct {
-	merchantID string
-	requestURL string
-	verifyURL  string
-	refundURL  string
-	paymentURL string
-	client     *http.Client
+	merchantID   string
+	requestURL   string
+	verifyURL    string
+	refundURL    string
+	refundURLSet bool // set by WithRefundURL; WithEndpoints then keeps refundURL
+	paymentURL   string
+	client       *http.Client
 }
 
 type Option func(*Gateway)
@@ -57,6 +58,11 @@ func WithHTTPClient(c *http.Client) Option {
 // WithEndpoints overrides the request, verify, and payment page URLs.
 func WithEndpoints(requestURL, verifyURL, paymentURL string) Option {
 	return func(g *Gateway) {
+		// Endpoints overridden for a mock or staging server must not leave
+		// refunds pointed at production: without WithRefundURL, Refund refuses.
+		if !g.refundURLSet {
+			g.refundURL = ""
+		}
 		g.requestURL = requestURL
 		g.verifyURL = verifyURL
 		g.paymentURL = paymentURL
@@ -65,7 +71,7 @@ func WithEndpoints(requestURL, verifyURL, paymentURL string) Option {
 
 // WithRefundURL overrides the refund endpoint.
 func WithRefundURL(refundURL string) Option {
-	return func(g *Gateway) { g.refundURL = refundURL }
+	return func(g *Gateway) { g.refundURL, g.refundURLSet = refundURL, true }
 }
 
 func New(merchantID string, opts ...Option) *Gateway {
@@ -242,6 +248,9 @@ func (g *Gateway) Request(ctx context.Context, p *payjet.Payment) (*payjet.Reque
 // Verify confirms the payment. When p.Token is set it must match the callback's
 // Authority.
 func (g *Gateway) Verify(ctx context.Context, p *payjet.Payment, params map[string]string) (*payjet.VerifyResult, error) {
+	if p == nil {
+		return nil, payjet.Invalid("zarinpal", "verify", "payment is nil")
+	}
 	status := payjet.Param(params, "Status")
 	if !strings.EqualFold(status, "OK") {
 		return nil, payjet.Declined("zarinpal", "verify", status, "")
@@ -286,6 +295,13 @@ func (g *Gateway) Verify(ctx context.Context, p *payjet.Payment, params map[stri
 // Refund reverses the whole payment. It needs p.Token, the Authority Request
 // issued; v is not used.
 func (g *Gateway) Refund(ctx context.Context, p *payjet.Payment, _ *payjet.VerifyResult) (*payjet.RefundResult, error) {
+	if p == nil {
+		return nil, payjet.Invalid("zarinpal", "refund", "payment is nil")
+	}
+	if g.refundURL == "" {
+		return nil, payjet.Invalid("zarinpal", "refund",
+			"no refund endpoint: WithEndpoints overrides the defaults, so set WithRefundURL too")
+	}
 	if p.Token == "" {
 		return nil, payjet.Invalid("zarinpal", "refund", "Payment.Token (the Authority) is required to refund")
 	}

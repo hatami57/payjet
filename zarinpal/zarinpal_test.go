@@ -370,3 +370,23 @@ func TestRefund_RequiresToken(t *testing.T) {
 
 	assert.True(t, errorx.IsBadRequestError(err))
 }
+
+// Overriding the endpoints (a mock, a staging server) must not leave refunds
+// going to production.
+func TestRefund_EndpointsOverriddenWithoutRefundURL(t *testing.T) {
+	gw := zarinpal.New("m", zarinpal.WithEndpoints("http://127.0.0.1:1/r", "http://127.0.0.1:1/v", "http://127.0.0.1:1/p"))
+
+	_, err := gw.Refund(context.Background(), paidPayment(), nil)
+
+	assert.True(t, errorx.IsBadRequestError(err))
+}
+
+func TestRefund_RefundURLSurvivesWithEndpoints(t *testing.T) {
+	gw, _ := refundServer(t, `{"code":100}`)
+	// refundServer set WithRefundURL; a later WithEndpoints must keep it.
+	zarinpal.WithEndpoints("http://127.0.0.1:1/r", "http://127.0.0.1:1/v", "http://127.0.0.1:1/p")(gw)
+
+	_, err := gw.Refund(context.Background(), paidPayment(), nil)
+
+	require.NoError(t, err)
+}

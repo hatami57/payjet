@@ -86,7 +86,7 @@ func newGateway(t *testing.T, m *parsianMock) *parsian.Gateway {
 }
 
 var testPayment = &payjet.Payment{
-	OrderID:     "order-55",
+	OrderID:     "550055",
 	Amount:      600_000,
 	CallbackURL: "https://shop.ir/callback",
 	Description: "پرداخت",
@@ -317,6 +317,58 @@ func TestRefund_RequiresToken(t *testing.T) {
 	gw, _ := reversalServer(t, "0", "")
 
 	_, err := gw.Refund(context.Background(), testPayment, nil)
+
+	assert.True(t, errorx.IsBadRequestError(err))
+}
+
+func TestRequest_NonNumericOrderID(t *testing.T) {
+	gw := newGateway(t, &parsianMock{saleStatus: "0", saleToken: "tok"})
+	p := *testPayment
+	p.OrderID = "order-55"
+
+	_, err := gw.Request(context.Background(), &p)
+
+	assert.True(t, errorx.IsBadRequestError(err))
+}
+
+// A 200 reply that is not a ConfirmPayment response says nothing about the
+// payment, so it must not read as a rejection that fails a paid order.
+func TestVerify_UnrecognisedConfirmReplyIsFault(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`<html><body>Service temporarily unavailable</body></html>`))
+	}))
+	t.Cleanup(srv.Close)
+	gw := parsian.New("acc", parsian.WithEndpoints(srv.URL, srv.URL, ""))
+
+	_, err := gw.Verify(context.Background(), withToken("tok"), map[string]string{
+		"status": "0", "Token": "tok", "OrderId": testPayment.OrderID,
+	})
+
+	require.Error(t, err)
+	assert.True(t, errorx.IsInternalError(err))
+}
+
+// A reply cut off mid-body is a fault, never a parsed (and so empty) reply.
+func TestVerify_TruncatedConfirmReplyIsFault(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "10000")
+		w.Write([]byte(`<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body>`))
+	}))
+	t.Cleanup(srv.Close)
+	gw := parsian.New("acc", parsian.WithEndpoints(srv.URL, srv.URL, ""))
+
+	_, err := gw.Verify(context.Background(), withToken("tok"), map[string]string{
+		"status": "0", "Token": "tok", "OrderId": testPayment.OrderID,
+	})
+
+	require.Error(t, err)
+	assert.True(t, errorx.IsInternalError(err))
+}
+
+func TestRefund_EndpointsOverriddenWithoutRefundURL(t *testing.T) {
+	gw := parsian.New("acc", parsian.WithEndpoints("http://127.0.0.1:1/s", "http://127.0.0.1:1/c", ""))
+
+	_, err := gw.Refund(context.Background(), withToken("tok"), nil)
 
 	assert.True(t, errorx.IsBadRequestError(err))
 }

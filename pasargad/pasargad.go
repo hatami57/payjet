@@ -139,6 +139,13 @@ func (g *Gateway) getToken(ctx context.Context) (string, error) {
 	return result.Token, nil
 }
 
+// authFault reports a failed login during op. Once a payment exists, the bank
+// refusing our credentials says nothing about the payment itself, so it is a
+// fault to retry, not a rejection that would fail the order.
+func authFault(op string, err error) error {
+	return payjet.Fault("pasargad", op, "authentication failed", err)
+}
+
 // ---- request / verify -------------------------------------------------------
 
 type purchaseRequest struct {
@@ -205,6 +212,9 @@ func (g *Gateway) Request(ctx context.Context, p *payjet.Payment) (*payjet.Reque
 		return nil, payjet.Rejected("pasargad", "request",
 			strconv.Itoa(result.ResultCode), result.ResultMsg)
 	}
+	if result.Data.UrlId == "" || result.Data.Url == "" {
+		return nil, payjet.Fault("pasargad", "request", "purchase succeeded without a UrlId or payment URL", nil)
+	}
 	return &payjet.RequestResult{
 		Token:      result.Data.UrlId,
 		PaymentURL: result.Data.Url,
@@ -216,6 +226,9 @@ func (g *Gateway) Request(ctx context.Context, p *payjet.Payment) (*payjet.Reque
 // purchase UrlId) issued for p: Pasargad's callback carries only invoiceId,
 // status, referenceNumber and trackId, and Verify-Payment needs the UrlId.
 func (g *Gateway) Verify(ctx context.Context, p *payjet.Payment, params map[string]string) (*payjet.VerifyResult, error) {
+	if p == nil {
+		return nil, payjet.Invalid("pasargad", "verify", "payment is nil")
+	}
 	status := payjet.Param(params, "status")
 	if !strings.EqualFold(status, "success") {
 		return nil, payjet.Declined("pasargad", "verify", status, "")
@@ -228,7 +241,7 @@ func (g *Gateway) Verify(ctx context.Context, p *payjet.Payment, params map[stri
 	}
 	token, err := g.getToken(ctx)
 	if err != nil {
-		return nil, err
+		return nil, authFault("verify", err)
 	}
 	var result verifyResponse
 	if err := g.post(ctx, g.verifyPath, token, verifyRequest{
@@ -281,12 +294,15 @@ func (r *reverseResponse) failure() (code, message string, failed bool) {
 // Refund reverses the whole payment. It needs p.Token, the purchase UrlId
 // Request issued; v is not used.
 func (g *Gateway) Refund(ctx context.Context, p *payjet.Payment, _ *payjet.VerifyResult) (*payjet.RefundResult, error) {
+	if p == nil {
+		return nil, payjet.Invalid("pasargad", "refund", "payment is nil")
+	}
 	if p.Token == "" {
 		return nil, payjet.Invalid("pasargad", "refund", "Payment.Token (the purchase UrlId) is required to refund a Pasargad payment")
 	}
 	token, err := g.getToken(ctx)
 	if err != nil {
-		return nil, err
+		return nil, authFault("refund", err)
 	}
 	var result reverseResponse
 	if err := g.post(ctx, g.reversePath, token, reverseRequest{

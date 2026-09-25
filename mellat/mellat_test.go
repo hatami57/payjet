@@ -227,6 +227,18 @@ func TestVerify_SettleFails(t *testing.T) {
 	_, err := gw.Verify(context.Background(), testPayment, successCallbackParams)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "61")
+	// The payment verified, so a failed settle must read as retryable, not as
+	// a decline that fails the order.
+	assert.True(t, errorx.IsInternalError(err))
+	assert.False(t, errorx.IsBusinessError(err))
+}
+
+func TestVerify_EmptyReturnIsFault(t *testing.T) {
+	gw := newGateway(t, &soapMock{verifyReturn: "", settleReturn: "0"})
+
+	_, err := gw.Verify(context.Background(), testPayment, successCallbackParams)
+	require.Error(t, err)
+	assert.True(t, errorx.IsInternalError(err))
 }
 
 func TestVerify_MissingRefId(t *testing.T) {

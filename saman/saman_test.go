@@ -286,3 +286,50 @@ func TestRefund_RequiresRefNum(t *testing.T) {
 
 	assert.True(t, errorx.IsBadRequestError(err))
 }
+
+func TestVerify_DuplicateIsAlreadyVerified(t *testing.T) {
+	gw := newGateway(t, &samanMock{verifyCode: 2, verifyRRN: "rrn-2", verifyAmount: testPayment.Amount})
+
+	res, err := gw.Verify(context.Background(), testPayment, map[string]string{
+		"Status": "2", "ResNum": testPayment.OrderID, "RefNum": "ref-1",
+	})
+
+	require.NoError(t, err)
+	assert.True(t, res.AlreadyVerified)
+	assert.Equal(t, "rrn-2", res.RefID)
+}
+
+// A duplicate reply for another amount is still not this order's payment.
+func TestVerify_DuplicateStillChecksAmount(t *testing.T) {
+	gw := newGateway(t, &samanMock{verifyCode: 2, verifyRRN: "rrn-2", verifyAmount: 1000})
+
+	_, err := gw.Verify(context.Background(), testPayment, map[string]string{
+		"Status": "2", "ResNum": testPayment.OrderID, "RefNum": "ref-1",
+	})
+
+	assert.ErrorIs(t, err, payjet.ErrAmountMismatch)
+}
+
+func TestRequest_StringErrorCode(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"status":-1,"errorCode":"5","errorDesc":"invalid terminal"}`))
+	}))
+	t.Cleanup(srv.Close)
+	gw := saman.New("123456789", saman.WithEndpoints(srv.URL, "", srv.URL))
+
+	_, err := gw.Request(context.Background(), testPayment)
+
+	require.Error(t, err)
+	assert.True(t, errorx.IsBusinessError(err))
+	ce := errorx.GetError(err)
+	require.NotNil(t, ce)
+	assert.Equal(t, "5", ce.Params["gatewayCode"])
+}
+
+func TestRefund_EndpointsOverriddenWithoutReverseURL(t *testing.T) {
+	gw := saman.New("123456789", saman.WithEndpoints("http://127.0.0.1:1/t", "", "http://127.0.0.1:1/v"))
+
+	_, err := gw.Refund(context.Background(), testPayment, verified)
+
+	assert.True(t, errorx.IsBadRequestError(err))
+}

@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hatami57/microjet/core/errorx"
 
@@ -326,4 +327,44 @@ func TestRefund_UnknownCodeRejected(t *testing.T) {
 	_, err := gw.Refund(context.Background(), testPayment, &payjet.VerifyResult{RefID: "made-up"})
 
 	require.Error(t, err)
+}
+
+// ── Housekeeping ──────────────────────────────────────────────────────────────
+
+func TestRetention_ForgetsOldPayments(t *testing.T) {
+	gw := virtual.New("http://localhost:8080/pay", virtual.WithRetention(time.Millisecond))
+	old, err := gw.Request(context.Background(), testPayment)
+	require.NoError(t, err)
+	params := gw.SimulatePayment(testPayment.OrderID, true)
+
+	time.Sleep(5 * time.Millisecond)
+	_, err = gw.Request(context.Background(), testPayment) // prunes
+
+	// Both the pending page and the paid code are gone.
+	srv := httptest.NewServer(gw.Handler())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "?token=" + old.Token)
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	_, err = gw.Verify(context.Background(), testPayment, params)
+	assert.Error(t, err)
+}
+
+func TestHandler_POST_DoubleSubmitRefused(t *testing.T) {
+	gw := virtual.New("http://localhost:8080/pay")
+	req, _ := gw.Request(context.Background(), testPayment)
+	srv := httptest.NewServer(gw.Handler())
+	defer srv.Close()
+	client := noRedirectClient()
+
+	var codes []int
+	for range 2 {
+		resp, err := client.PostForm(srv.URL, url.Values{"token": {req.Token}, "pay": {"1"}})
+		require.NoError(t, err)
+		resp.Body.Close()
+		codes = append(codes, resp.StatusCode)
+	}
+	assert.Equal(t, http.StatusFound, codes[0])
+	assert.NotEqual(t, http.StatusFound, codes[1], "the second submit must not issue another code")
 }
