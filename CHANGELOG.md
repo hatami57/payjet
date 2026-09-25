@@ -4,6 +4,22 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Updated to microjet v0.41.0** (from v0.30.0). No payjet code changes were
+  needed. Two microjet behavior changes are worth knowing when serving payjet
+  errors over HTTP:
+  - Since v0.41.0, the HTTP error middleware renders `Internal` errors (payjet's
+    transport and parse faults) as a generic 500 outside debug mode, without the
+    subject, message, code, or params. `Business` and `BadRequest` responses
+    still carry the full payload. Since v0.33.0 the middleware also logs every
+    attached error server-side.
+  - Since v0.41.0, `c.ClientIP()` ignores `X-Forwarded-For`/`X-Real-IP` unless
+    the peer is listed in `[http] trustedProxies`. Set it when running the
+    webshop example (or your app) behind a proxy.
+
 ## [0.7.0] - 2026-07-16
 
 ### Changed

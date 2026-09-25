@@ -203,7 +203,10 @@ carry a category, the gateway name (as the error `Subject`), and the raw bank
 code and operation (in `Params`). The category maps straight to an HTTP status
 through microjet's HTTP error middleware: declines and rejections are `Business`
 (409), bad caller input is `BadRequest` (400), and transport/parse faults are
-`Internal` (500). Inspect them with microjet's helpers:
+`Internal` (500). Outside debug mode the middleware renders `Internal` errors as
+a generic 500 without their subject, message, code, or params (they are still
+logged server-side), so only `Business` and `BadRequest` responses carry the
+gateway name and bank code to the client. Inspect them with microjet's helpers:
 
 ```go
 import "github.com/hatami57/microjet/core/errorx"
@@ -370,7 +373,7 @@ reinventing the same infrastructure:
   `host.MustNew().Configure(cfg).WithModule(gormx.Module(postgres.Driver())).WithModule(payjet.Module()).WithModule(httpx.Module()).Setup(...).MustRun()`
   chain. See [Examples](#examples) for the focused demos.
 
-payjet pins microjet's modules at `v0.19.0` and uses `replace` directives in
+payjet pins microjet's modules at `v0.41.0` and uses `replace` directives in
 `go.mod` to build against a sibling `../microjet` checkout during development.
 To consume payjet via `go get` against published microjet modules, drop the
 replaces.
