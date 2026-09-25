@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/hatami57/microjet/core/errorx"
 	"github.com/majid/payjet"
 	"github.com/majid/payjet/zarinpal"
 	"github.com/stretchr/testify/assert"
@@ -210,4 +211,22 @@ func TestWithHTTPClient(t *testing.T) {
 	res, err := gw.Request(context.Background(), testPayment)
 	require.NoError(t, err)
 	assert.Equal(t, "custom-client-auth", res.Token)
+}
+
+func TestRequest_MalformedResponseIsGatewayFault(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("<html>bad gateway</html>"))
+	}))
+	t.Cleanup(srv.Close)
+	gw := zarinpal.New("test-merchant-id", zarinpal.WithEndpoints(srv.URL, srv.URL, srv.URL))
+
+	_, err := gw.Request(context.Background(), testPayment)
+
+	require.Error(t, err)
+	assert.True(t, errorx.IsInternalError(err))
+	ce := errorx.GetError(err)
+	require.NotNil(t, ce)
+	assert.Equal(t, "zarinpal", ce.Subject)
+	assert.Equal(t, "request", ce.Params["op"])
+	assert.NotNil(t, ce.Inner)
 }

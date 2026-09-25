@@ -15,6 +15,9 @@ debug = true
 [http]
 host = "0.0.0.0"
 port = 8080
+# Behind a reverse proxy, list its addresses so the access log and per-IP rate
+# limiting see the real client IP (X-Forwarded-For is ignored otherwise):
+# trustedProxies = ["10.0.0.0/8"]
 
 [database]
 host = "localhost"

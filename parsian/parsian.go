@@ -131,7 +131,7 @@ func (g *Gateway) Request(ctx context.Context, p *payjet.Payment) (*payjet.Reque
 	)
 	data, err := soap.Post(ctx, g.client, g.requestURL, `"SalePaymentRequest"`, envelope)
 	if err != nil {
-		return nil, err
+		return nil, payjet.Fault("parsian", "request", "SalePaymentRequest call failed", err)
 	}
 	raw := string(data)
 	status := xmlNodeValue(raw, "Status", requestNS)
@@ -171,7 +171,7 @@ func (g *Gateway) Verify(ctx context.Context, p *payjet.Payment, params map[stri
 	)
 	data, err := soap.Post(ctx, g.client, g.verifyURL, `"ConfirmPayment"`, envelope)
 	if err != nil {
-		return nil, err
+		return nil, payjet.Fault("parsian", "verify", "ConfirmPayment call failed", err)
 	}
 	raw := string(data)
 	status := xmlNodeValue(raw, "Status", verifyNS)

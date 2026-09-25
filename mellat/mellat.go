@@ -111,7 +111,7 @@ func (g *Gateway) call(ctx context.Context, action, innerXML string) (string, er
 	}
 	var env soapEnvelope
 	if err := xml.Unmarshal(data, &env); err != nil {
-		return "", fmt.Errorf("mellat: failed to parse SOAP response: %w", err)
+		return "", fmt.Errorf("parsing SOAP response: %w", err)
 	}
 	return strings.TrimSpace(env.Body.Response.Return), nil
 }
@@ -153,7 +153,7 @@ func (g *Gateway) Request(ctx context.Context, p *payjet.Payment) (*payjet.Reque
 	)
 	raw, err := g.call(ctx, "bpPayRequest", body)
 	if err != nil {
-		return nil, err
+		return nil, payjet.Fault("mellat", "request", "bpPayRequest call failed", err)
 	}
 	parts := strings.SplitN(raw, ",", 2)
 	if len(parts) != 2 {
@@ -218,7 +218,7 @@ func (g *Gateway) verify(ctx context.Context, orderID, saleOrderID, saleRefID in
 	)
 	code, err := g.call(ctx, "bpVerifyRequest", body)
 	if err != nil {
-		return err
+		return payjet.Fault("mellat", "verify", "bpVerifyRequest call failed", err)
 	}
 	if code != "0" && code != "43" { // 43 = already verified
 		return payjet.Rejected("mellat", "verify", code, "")
@@ -241,7 +241,7 @@ func (g *Gateway) settle(ctx context.Context, orderID, saleOrderID, saleRefID in
 	)
 	code, err := g.call(ctx, "bpSettleRequest", body)
 	if err != nil {
-		return err
+		return payjet.Fault("mellat", "settle", "bpSettleRequest call failed", err)
 	}
 	if code != "0" && code != "45" { // 45 = already settled
 		return payjet.Rejected("mellat", "settle", code, "")

@@ -136,7 +136,7 @@ func (g *Gateway) Request(ctx context.Context, p *payjet.Payment) (*payjet.Reque
 		Desc:     p.Description,
 		Callback: p.CallbackURL,
 	}, &result); err != nil {
-		return nil, err
+		return nil, payjet.Fault("idpay", "request", "gateway call failed", err)
 	}
 	if result.ID == "" {
 		return nil, payjet.Rejected("idpay", "request",
@@ -159,7 +159,7 @@ func (g *Gateway) Verify(ctx context.Context, p *payjet.Payment, params map[stri
 		ID:      params["id"],
 		OrderID: params["order_id"],
 	}, &result); err != nil {
-		return nil, err
+		return nil, payjet.Fault("idpay", "verify", "gateway call failed", err)
 	}
 	if result.Status != verifySuccessStatus {
 		return nil, payjet.Rejected("idpay", "verify",

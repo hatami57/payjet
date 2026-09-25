@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/hatami57/microjet/core/errorx"
 	"github.com/majid/payjet"
 	"github.com/majid/payjet/saman"
 	"github.com/stretchr/testify/assert"
@@ -182,4 +183,21 @@ func TestVerify_GatewayError(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "404")
+}
+
+func TestVerify_TransportFailureIsGatewayFault(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	srv.Close() // every call fails to connect
+	gw := saman.New("123456789", saman.WithEndpoints(srv.URL, "", srv.URL))
+
+	_, err := gw.Verify(context.Background(), testPayment, map[string]string{
+		"Status": "2", "ResNum": testPayment.OrderID, "RefNum": "ref-1",
+	})
+
+	require.Error(t, err)
+	assert.True(t, errorx.IsInternalError(err))
+	ce := errorx.GetError(err)
+	require.NotNil(t, ce)
+	assert.Equal(t, "saman", ce.Subject)
+	assert.Equal(t, "verify", ce.Params["op"])
 }

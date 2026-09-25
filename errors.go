@@ -24,8 +24,11 @@ var (
 
 // gatewayError builds the structured *errorx.Error shared by all the helpers
 // below. The gateway name becomes the error Subject, and op/gatewayCode are
-// attached as Params so logs and JSON responses carry them. inner, when set,
-// is a sentinel (e.g. ErrCancelled) that keeps errors.Is working.
+// attached as Params for callers inspecting the error with errorx.GetError.
+// microjet's HTTP error middleware does not log Params and, outside debug mode,
+// drops them from Internal responses, so detail that must reach the logs
+// belongs in inner. inner, when set, is a sentinel (e.g. ErrCancelled) that
+// keeps errors.Is working, or the underlying cause of a Fault.
 func gatewayError(typ errorx.ErrorType, gateway, op, code, message string, inner error) *errorx.Error {
 	if message == "" {
 		message = fmt.Sprintf("gateway %s failed", op)

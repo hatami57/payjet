@@ -199,14 +199,27 @@ case err != nil:
 
 Gateway failures are structured [`*errorx.Error`](https://github.com/hatami57/microjet)
 values (from microjet — see [Built on microjet](#built-on-microjet)), so they
-carry a category, the gateway name (as the error `Subject`), and the raw bank
-code and operation (in `Params`). The category maps straight to an HTTP status
-through microjet's HTTP error middleware: declines and rejections are `Business`
-(409), bad caller input is `BadRequest` (400), and transport/parse faults are
-`Internal` (500). Outside debug mode the middleware renders `Internal` errors as
-a generic 500 without their subject, message, code, or params (they are still
-logged server-side), so only `Business` and `BadRequest` responses carry the
-gateway name and bank code to the client. Inspect them with microjet's helpers:
+carry a category, the gateway name (as the error `Subject`), and the operation
+(`op`) plus, when the bank returned one, its raw code (`gatewayCode`) in
+`Params`. `Payment` validation errors, which fire before any gateway is called,
+use the subject `payment` (or `amount` for the money helpers) instead.
+
+The category maps straight to an HTTP status through microjet's HTTP error
+middleware: declines and rejections are `Business` (409), bad caller input is
+`BadRequest` (400), and transport/parse faults are `Internal` (500). For an
+`Internal` fault the underlying cause — the network error, the HTTP status and
+body, or the SOAP `faultstring` — is the error's `Inner`.
+
+What reaches the client and the logs differs outside debug mode:
+
+- **Response:** `Business` and `BadRequest` bodies carry subject, message, and
+  params. `Internal` errors are rendered as a generic 500 without any of them.
+  The inner cause is dropped for every category.
+- **Logs:** the middleware logs each error's subject, message, code, and inner
+  cause, but not its `Params`. The cause of an `Internal` fault is therefore
+  logged; `op` and `gatewayCode` are not.
+
+Inspect them with microjet's helpers:
 
 ```go
 import "github.com/hatami57/microjet/core/errorx"
@@ -373,8 +386,8 @@ reinventing the same infrastructure:
   `host.MustNew().Configure(cfg).WithModule(gormx.Module(postgres.Driver())).WithModule(payjet.Module()).WithModule(httpx.Module()).Setup(...).MustRun()`
   chain. See [Examples](#examples) for the focused demos.
 
-payjet pins microjet's modules at `v0.41.0` and uses `replace` directives in
-`go.mod` to build against a sibling `../microjet` checkout during development.
+payjet pins microjet's modules in `go.mod`, where `replace` directives build
+against a sibling `../microjet` checkout during development.
 To consume payjet via `go get` against published microjet modules, drop the
 replaces.
 

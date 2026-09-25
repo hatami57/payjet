@@ -139,7 +139,7 @@ func (g *Gateway) Request(ctx context.Context, p *payjet.Payment) (*payjet.Reque
 		Mobile:      p.Mobile,
 		Email:       p.Email,
 	}, &result); err != nil {
-		return nil, err
+		return nil, payjet.Fault("zarinpal", "request", "gateway call failed", err)
 	}
 	if result.Data.Code != 100 {
 		return nil, payjet.Rejected("zarinpal", "request",
@@ -162,7 +162,7 @@ func (g *Gateway) Verify(ctx context.Context, p *payjet.Payment, params map[stri
 		Amount:     p.Amount,
 		Authority:  params["Authority"],
 	}, &result); err != nil {
-		return nil, err
+		return nil, payjet.Fault("zarinpal", "verify", "gateway call failed", err)
 	}
 	// 101 = already verified — idempotent success
 	if result.Data.Code != 100 && result.Data.Code != 101 {

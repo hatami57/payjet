@@ -73,3 +73,23 @@ func TestPostHTTPErrorStatus(t *testing.T) {
 		t.Fatal("expected error for 500 response")
 	}
 }
+
+func TestPostTruncatesLargeErrorBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(strings.Repeat("x", 10*maxBodyParam)))
+	}))
+	defer srv.Close()
+
+	_, err := Post(context.Background(), srv.Client(), srv.URL, "X", `<x/>`)
+	ce := errorx.GetError(err)
+	if ce == nil {
+		t.Fatalf("err = %v, want *errorx.Error", err)
+	}
+	if ce.Params["status"] != http.StatusBadGateway {
+		t.Errorf("status = %v, want 502", ce.Params["status"])
+	}
+	if body, _ := ce.Params["body"].(string); len(body) > maxBodyParam+len("…") {
+		t.Errorf("body length = %d, want at most %d", len(body), maxBodyParam+len("…"))
+	}
+}

@@ -21,10 +21,17 @@ import (
 	"github.com/hatami57/microjet/core/errorx"
 )
 
+// maxBodyParam caps how much of a non-2xx response body is kept on the error.
+// Callers wrap these errors as an inner cause, which microjet logs, so an HTML
+// error page must not become a multi-kilobyte log line.
+const maxBodyParam = 1024
+
 // Post sends envelope to url as a SOAP 1.1 request using httpClient. action is
 // written to the SOAPAction header verbatim (callers pass exactly what their
 // bank expects — a bare operation name, a namespaced URL, quoted or not). On a
-// non-2xx response or a soap:Fault it returns a *errorx.Error (Internal); on
+// non-2xx response or a soap:Fault it returns a *errorx.Error (Internal) with the
+// details in Params; callers wrap it with payjet.Fault so it carries the gateway
+// name and its Error() string (params included) is logged as the inner cause. On
 // success it returns the raw response body for the caller to parse.
 func Post(ctx context.Context, httpClient *http.Client, url, action, envelope string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(envelope))
@@ -44,13 +51,20 @@ func Post(ctx context.Context, httpClient *http.Client, url, action, envelope st
 	data, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, errorx.NewInternalError("soap", fmt.Sprintf("upstream returned %d", resp.StatusCode)).
-			WithParams("status", resp.StatusCode, "body", string(data))
+			WithParams("status", resp.StatusCode, "body", truncate(string(data), maxBodyParam))
 	}
 	if code, str, ok := fault(data); ok {
 		return nil, errorx.NewInternalError("soap", "SOAP fault").
 			WithParams("faultcode", code, "faultstring", str, "action", action)
 	}
 	return data, nil
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
 
 // fault scans a SOAP response for a soap:Fault element (any namespace prefix)

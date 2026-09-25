@@ -61,6 +61,26 @@ func New(terminalID string, opts ...Option) *Gateway {
 	return g
 }
 
+// ---- helpers ----------------------------------------------------------------
+
+func (g *Gateway) postJSON(ctx context.Context, url string, body, out interface{}) error {
+	b, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(b))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := g.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return json.NewDecoder(resp.Body).Decode(out)
+}
+
 // ---- request / verify -------------------------------------------------------
 
 type tokenRequest struct {
@@ -88,31 +108,16 @@ func (g *Gateway) Request(ctx context.Context, p *payjet.Payment) (*payjet.Reque
 	if err := p.Validate(); err != nil {
 		return nil, err
 	}
-	b, err := json.Marshal(tokenRequest{
+	var result tokenResponse
+	if err := g.postJSON(ctx, g.tokenURL, tokenRequest{
 		Action:      "token",
 		TerminalId:  g.terminalID,
 		Amount:      p.Amount,
 		ResNum:      p.OrderID,
 		RedirectUrl: p.CallbackURL,
 		CellNumber:  p.Mobile,
-	})
-	if err != nil {
-		return nil, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, g.tokenURL, bytes.NewReader(b))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := g.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	var result tokenResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
+	}, &result); err != nil {
+		return nil, payjet.Fault("saman", "request", "gateway call failed", err)
 	}
 	if result.Status != 1 || result.Token == "" {
 		return nil, payjet.Rejected("saman", "request",
@@ -150,29 +155,12 @@ func (g *Gateway) Verify(ctx context.Context, p *payjet.Payment, params map[stri
 	if params["ResNum"] != p.OrderID {
 		return nil, payjet.Mismatch("saman", "verify", payjet.ErrOrderMismatch)
 	}
-
-	b, err := json.Marshal(verifyRequest{
+	var result verifyResponse
+	if err := g.postJSON(ctx, g.verifyURL, verifyRequest{
 		RefNum:         params["RefNum"],
 		TerminalNumber: g.terminalID,
-	})
-	if err != nil {
-		return nil, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, g.verifyURL, bytes.NewReader(b))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := g.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	var result verifyResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
+	}, &result); err != nil {
+		return nil, payjet.Fault("saman", "verify", "gateway call failed", err)
 	}
 	if result.ResultCode != 0 {
 		return nil, payjet.Rejected("saman", "verify",

@@ -120,7 +120,7 @@ type tokenResponse struct {
 func (g *Gateway) getToken(ctx context.Context) (string, error) {
 	var result tokenResponse
 	if err := g.post(ctx, g.getTokenPath, "", tokenRequest{Username: g.username, Password: g.password}, &result); err != nil {
-		return "", err
+		return "", payjet.Fault("pasargad", "auth", "gateway call failed", err)
 	}
 	if result.ResultCode != 0 || result.Token == "" {
 		return "", payjet.Rejected("pasargad", "auth",
@@ -189,7 +189,7 @@ func (g *Gateway) Request(ctx context.Context, p *payjet.Payment) (*payjet.Reque
 		Description:    p.Description,
 		PayerMail:      p.Email,
 	}, &result); err != nil {
-		return nil, err
+		return nil, payjet.Fault("pasargad", "request", "gateway call failed", err)
 	}
 	if result.ResultCode != 0 {
 		return nil, payjet.Rejected("pasargad", "request",
@@ -218,7 +218,7 @@ func (g *Gateway) Verify(ctx context.Context, p *payjet.Payment, params map[stri
 		Invoice: p.OrderID,
 		UrlId:   params["urlId"],
 	}, &result); err != nil {
-		return nil, err
+		return nil, payjet.Fault("pasargad", "verify", "gateway call failed", err)
 	}
 	if result.ResultCode != 0 {
 		return nil, payjet.Rejected("pasargad", "verify",

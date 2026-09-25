@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hatami57/microjet/core/errorx"
 	"github.com/majid/payjet"
 	"github.com/majid/payjet/mellat"
 	"github.com/stretchr/testify/assert"
@@ -206,4 +207,31 @@ func TestWithHTTPClient(t *testing.T) {
 	res, err := gw.Request(context.Background(), testPayment)
 	require.NoError(t, err)
 	assert.Equal(t, "custom-client-ref", res.Token)
+}
+
+// ── transport failures ────────────────────────────────────────────────────────
+
+func TestRequest_SOAPFaultIsGatewayFault(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">` +
+			`<soapenv:Body><soapenv:Fault>` +
+			`<faultcode>soapenv:Server</faultcode><faultstring>invalid terminal</faultstring>` +
+			`</soapenv:Fault></soapenv:Body></soapenv:Envelope>`))
+	}))
+	t.Cleanup(srv.Close)
+	gw := mellat.New(mellat.Config{TerminalID: 12345, Username: "user", Password: "pass"},
+		mellat.WithEndpoints(srv.URL, mellat.DefaultPaymentURL))
+
+	_, err := gw.Request(context.Background(), testPayment)
+
+	require.Error(t, err)
+	assert.True(t, errorx.IsInternalError(err))
+	ce := errorx.GetError(err)
+	require.NotNil(t, ce)
+	assert.Equal(t, "mellat", ce.Subject)
+	assert.Equal(t, "request", ce.Params["op"])
+	// The fault detail rides in the inner cause, which microjet's HTTP error
+	// middleware logs (it does not log Params).
+	require.NotNil(t, ce.Inner)
+	assert.Contains(t, ce.Inner.Error(), "invalid terminal")
 }
