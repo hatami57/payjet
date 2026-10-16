@@ -1,15 +1,15 @@
-module github.com/majid/payjet
+module github.com/hatami57/payjet
 
 go 1.26.2
 
 require (
 	github.com/gin-gonic/gin v1.12.0
-	github.com/hatami57/microjet/core v0.41.0
-	github.com/hatami57/microjet/gormx v0.41.0
-	github.com/hatami57/microjet/gormx/postgres v0.41.0
-	github.com/hatami57/microjet/gormx/sqlite v0.41.0
-	github.com/hatami57/microjet/host v0.41.0
-	github.com/hatami57/microjet/httpx v0.41.0
+	github.com/hatami57/microjet/core v0.42.0
+	github.com/hatami57/microjet/gormx v0.42.0
+	github.com/hatami57/microjet/gormx/postgres v0.42.0
+	github.com/hatami57/microjet/gormx/sqlite v0.42.0
+	github.com/hatami57/microjet/host v0.42.0
+	github.com/hatami57/microjet/httpx v0.42.0
 	github.com/shopspring/decimal v1.4.0
 	github.com/stretchr/testify v1.11.1
 	gorm.io/gorm v1.31.1

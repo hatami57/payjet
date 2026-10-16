@@ -31,13 +31,13 @@ import (
 	"github.com/hatami57/microjet/gormx/postgres"
 	"github.com/hatami57/microjet/host"
 	"github.com/hatami57/microjet/httpx"
-	"github.com/majid/payjet"
-	"github.com/majid/payjet/idpay"
-	"github.com/majid/payjet/mellat"
-	"github.com/majid/payjet/parsian"
-	"github.com/majid/payjet/saman"
-	"github.com/majid/payjet/virtual"
-	"github.com/majid/payjet/zarinpal"
+	"github.com/hatami57/payjet"
+	"github.com/hatami57/payjet/idpay"
+	"github.com/hatami57/payjet/mellat"
+	"github.com/hatami57/payjet/parsian"
+	"github.com/hatami57/payjet/saman"
+	"github.com/hatami57/payjet/virtual"
+	"github.com/hatami57/payjet/zarinpal"
 )
 
 // ── persistence ──────────────────────────────────────────────────────────────

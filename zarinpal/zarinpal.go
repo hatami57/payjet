@@ -10,8 +10,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/majid/payjet"
-	"github.com/majid/payjet/internal/flexjson"
+	"github.com/hatami57/payjet"
+	"github.com/hatami57/payjet/internal/flexjson"
 )
 
 const (

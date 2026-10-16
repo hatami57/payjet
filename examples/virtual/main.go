@@ -14,8 +14,8 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/majid/payjet"
-	"github.com/majid/payjet/virtual"
+	"github.com/hatami57/payjet"
+	"github.com/hatami57/payjet/virtual"
 )
 
 func main() {

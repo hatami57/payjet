@@ -7,14 +7,14 @@ import (
 	"github.com/hatami57/microjet/core/errorx"
 	"github.com/stretchr/testify/assert"
 
-	"github.com/majid/payjet"
-	"github.com/majid/payjet/idpay"
-	"github.com/majid/payjet/mellat"
-	"github.com/majid/payjet/parsian"
-	"github.com/majid/payjet/pasargad"
-	"github.com/majid/payjet/saman"
-	"github.com/majid/payjet/virtual"
-	"github.com/majid/payjet/zarinpal"
+	"github.com/hatami57/payjet"
+	"github.com/hatami57/payjet/idpay"
+	"github.com/hatami57/payjet/mellat"
+	"github.com/hatami57/payjet/parsian"
+	"github.com/hatami57/payjet/pasargad"
+	"github.com/hatami57/payjet/saman"
+	"github.com/hatami57/payjet/virtual"
+	"github.com/hatami57/payjet/zarinpal"
 )
 
 // A nil Payment is a caller bug: every gateway reports it instead of panicking.

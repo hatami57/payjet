@@ -5,7 +5,7 @@ import (
 
 	"github.com/hatami57/microjet/core/errorx"
 	"github.com/hatami57/microjet/core/types/money"
-	"github.com/majid/payjet"
+	"github.com/hatami57/payjet"
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

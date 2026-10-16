@@ -22,7 +22,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/majid/payjet"
+	"github.com/hatami57/payjet"
 )
 
 // Gateway is the virtual payment gateway.

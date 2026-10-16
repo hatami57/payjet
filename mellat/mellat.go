@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/majid/payjet"
-	"github.com/majid/payjet/internal/soap"
+	"github.com/hatami57/payjet"
+	"github.com/hatami57/payjet/internal/soap"
 )
 
 const (

@@ -8,8 +8,8 @@ import (
 	"testing"
 
 	"github.com/hatami57/microjet/core/errorx"
-	"github.com/majid/payjet"
-	"github.com/majid/payjet/zarinpal"
+	"github.com/hatami57/payjet"
+	"github.com/hatami57/payjet/zarinpal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

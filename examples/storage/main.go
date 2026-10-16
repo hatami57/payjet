@@ -16,7 +16,7 @@ import (
 	"sync"
 
 	"github.com/hatami57/microjet/core/errorx"
-	"github.com/majid/payjet"
+	"github.com/hatami57/payjet"
 )
 
 // memStore implements both payjet.PaymentStore and payjet.TransactionStore over

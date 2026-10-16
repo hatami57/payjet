@@ -19,7 +19,7 @@ touching your checkout or callback code. **All amounts are in Rials.**
 ## Install
 
 ```sh
-go get github.com/majid/payjet
+go get github.com/hatami57/payjet
 ```
 
 ## The interface
@@ -52,8 +52,8 @@ import (
     "net/http"
     "sync"
 
-    "github.com/majid/payjet"
-    "github.com/majid/payjet/zarinpal"
+    "github.com/hatami57/payjet"
+    "github.com/hatami57/payjet/zarinpal"
 )
 
 // order is a payment and where it stands: "pending", "processing" or "paid".

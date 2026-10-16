@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/majid/payjet"
+	"github.com/hatami57/payjet"
 )
 
 // Pasargad uses a merchant-specific base URL provided by the bank.

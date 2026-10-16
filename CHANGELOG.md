@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **The module path is now `github.com/hatami57/payjet`**, matching the
+  repository, so `go get github.com/hatami57/payjet` works. It was
+  `github.com/majid/payjet`, which could not be fetched. Update imports:
+  `github.com/majid/payjet/...` → `github.com/hatami57/payjet/...`.
+  (breaking)
+- Requires microjet v0.42.0.
+
 ## [0.11.0] - 2026-09-25
 
 A second full review. The main theme: several outcomes that say nothing about a
